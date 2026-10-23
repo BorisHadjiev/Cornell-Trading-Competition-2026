@@ -58,6 +58,32 @@ If the obvious island short fills 5 marks later and the pair trades still fill o
 6. Create or redeem only when both books still disagree after the spread.
 7. Obvious island trades are treated as slow fills. Pair trades may still be fast. A change stays only if the late-fill season does not get worse, and the sign agrees in at least 3 of 4 blocks of 25 holdout seasons.
 
+## Run on a laptop
+
+The contest bot runs on your machine, not in the cloud. Cloud runs are only for connection tests.
+
+```bash
+pip install -r requirements.txt
+export CTC_API_KEY=your-bot-key
+python -m model.live
+```
+
+Do not commit the key. `model/fitted.json` is already in the repo, so a live session does not need the research zip. The research zip is only for a refit.
+
+## Prototype
+
+The bot we run uses the competition book, not the empty-book maximum (next-mark mean 7,374).
+
+- Reserve half of PORT, ARCH, and REIN until the track turns.
+- Shrink the location add when a composition or insurer pair is already on.
+- Revision and known-damage at 35% of the original sleeve.
+- Severity stays small.
+- No ETF orders until a live book shows a gap after the spread.
+- Announcement stand-down is on.
+- The first testnet session is one season at fractional size.
+
+Crowded-fill result for this stack: mean 5,676, median 5,060, 10th percentile 354. Empty-book next-mark result after these rules: mean 6,336, median 5,824, 10th percentile 1,207.
+
 ## What we will not add
 
 No neural net. No hardcoded insurance bounds. No class prior that depends on the round or the previous storm (those tests failed). No momentum sleeve (the mark’s first move does not predict the next 40 seconds). No new parameter fit on seasons 501–600.
