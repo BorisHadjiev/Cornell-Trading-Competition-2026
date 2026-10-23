@@ -25,6 +25,12 @@ QUOTE_NOISE_DOLLARS = 0.05
 BASELINE_ODDS = 0.8
 BASELINE_CLIP = 0.1
 
+# Live only. The research backtest does not read these, and they are not sleeves.
+# Announcements are absent from the research seasons: stand down rather than invent a trade.
+# Spread crossing needs a book. market.csv has no spread, so research fills stay on the house mark.
+LIVE_ANNOUNCEMENT_STAND_DOWN = True
+LIVE_SPREAD_CROSSING = False
+
 # Structural groups from the case text and the architecture, not estimated.
 CLASSES = ("direct", "chain", "recurve", "stall", "eyewall", "erratic")
 PHYSICAL = ("PORT", "ISLE", "AQUA", "GRID", "FERRY")

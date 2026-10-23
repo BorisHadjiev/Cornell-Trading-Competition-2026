@@ -345,6 +345,14 @@ def targets_from_state(state: dict, models: Models, season, bar: int) -> tuple[n
     total = np.clip(total, -models.limits, models.limits)
     sleeves = portfolio._scale_to_match(sleeves, total)
     _rebucket(sleeves)
+    # Fill-delay check: revision and known damage collapse by a 5-mark fill.
+    # Size those two sleeves at the fractional knob. Do not scale severity up.
+    # Do not touch location or insurer_kink. Applied after rebucket so the kink
+    # book is not reduced. Spread-crossing is not a sleeve here; the fill is the
+    # house mark. A live book would be required before crossing a spread.
+    sleeves["revision"] *= PRE_TURN_FRACTION
+    sleeves["known_damage"] *= PRE_TURN_FRACTION
+    total = sum(sleeves.values())
     return total, sleeves
 
 
@@ -428,6 +436,7 @@ def run_season(season, models: Models, rng: np.random.Generator) -> dict:
                 continue
             for event in season.events:
                 if event["time"] == season.times[bar] and event["type"] == "announcement":
+                    # Live stand-down: record only. No research sleeve is added.
                     record(event, announcements)
             state = _state_at(season, bar, models, rng)
             target, sleeve_target = targets_from_state(state, models, season, bar)

@@ -1,10 +1,10 @@
 {
   "holdout": "seasons 501-600",
-  "fill": "next house mark after the decision; no spread",
+  "fill": "next house mark after the decision; no spread. revision and known_damage sized at PRE_TURN_FRACTION (0.35) after the fill-delay check",
   "our": {
-    "mean": 7878.245513424145,
-    "median": 7548.109184848107,
-    "p10": 1397.0921037755052
+    "mean": 7374.0252131843135,
+    "median": 7136.505189439719,
+    "p10": 1329.9744048011792
   },
   "baseline": {
     "mean": 256.43699999999995,
@@ -83,13 +83,63 @@
     }
   },
   "sleeve_means": {
-    "severity": 329.17473782568436,
-    "location": 2148.5995367680916,
-    "insurer_kink": 1898.041092117104,
-    "composition": 1274.405546561585,
-    "revision": 494.2490521001353,
-    "known_damage": 285.9064398533816,
-    "etf_gap": 1447.8691081981626
+    "severity": 321.93395513357456,
+    "location": 2157.4789631806243,
+    "insurer_kink": 1899.8694350053418,
+    "composition": 1274.7867342363597,
+    "revision": 172.46037486358532,
+    "known_damage": 99.62664256666784,
+    "etf_gap": 1447.8691081981628
   },
-  "unsatisfied": []
+  "unsatisfied": [],
+  "fill_delay_after_cut": {
+    "1": {
+      "book": {
+        "mean": 7374.0252131843135,
+        "median": 7136.505189439719,
+        "p10": 1329.9744048011792
+      },
+      "sleeves": {
+        "severity": 321.93395513357456,
+        "location": 2157.4789631806243,
+        "insurer_kink": 1899.8694350053418,
+        "composition": 1274.7867342363597,
+        "revision": 172.46037486358532,
+        "known_damage": 99.62664256666784,
+        "etf_gap": 1447.8691081981628
+      }
+    },
+    "2": {
+      "book": {
+        "mean": 4046.4970892363704,
+        "median": 3655.0625542824773,
+        "p10": -1772.1391013784423
+      },
+      "sleeves": {
+        "severity": 614.1415732121236,
+        "location": 1106.0760126513019,
+        "insurer_kink": 889.5763328213127,
+        "composition": 690.7906533818084,
+        "revision": -23.073963192194878,
+        "known_damage": -142.66235674250456,
+        "etf_gap": 911.6488371045235
+      }
+    },
+    "5": {
+      "book": {
+        "mean": 2891.0578633270657,
+        "median": 2597.1399949615275,
+        "p10": -3402.4827528069036
+      },
+      "sleeves": {
+        "severity": 654.434183567558,
+        "location": 893.7767277820329,
+        "insurer_kink": 819.6560515908837,
+        "composition": 626.654365952335,
+        "revision": -24.046150954270214,
+        "known_damage": -128.23919161605303,
+        "etf_gap": 48.8218770045802
+      }
+    }
+  }
 }

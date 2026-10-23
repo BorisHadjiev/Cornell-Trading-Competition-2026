@@ -1,6 +1,9 @@
 """Announcement stub.
 
 Research seasons do not emit these. The packet's 45 real seconds is not a fit.
+
+Live only: stand down on an announcement. This module records the symbols and
+does not open a position. It is not a research sleeve.
 """
 
 from __future__ import annotations
