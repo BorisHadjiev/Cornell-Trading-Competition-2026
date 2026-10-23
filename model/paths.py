@@ -39,6 +39,24 @@ class PathLibrary:
                     key = (int(labels[row]), int(age) // bin_seconds)
                     self.index.setdefault(key, []).append((which, row))
 
+    @classmethod
+    def from_labeled(cls, labeled: list[tuple[np.ndarray, np.ndarray]], bin_seconds: int = 10) -> "PathLibrary":
+        """Build the same index from obs arrays and age-labels. Used by the live runner."""
+        self = cls.__new__(cls)
+        self.bin_seconds = bin_seconds
+        self.entries = []
+        self.index = {}
+        for obs, labels in labeled:
+            entry = _Entry(obs=np.asarray(obs, dtype=float), labels=np.asarray(labels, dtype=int))
+            if entry.obs.shape[1] < 7:
+                raise RuntimeError("path is missing intensity")
+            which = len(self.entries)
+            self.entries.append(entry)
+            for row, age in enumerate(entry.obs[:, 0]):
+                key = (int(entry.labels[row]), int(age) // bin_seconds)
+                self.index.setdefault(key, []).append((which, int(row)))
+        return self
+
     def sample(self, class_name: str, age: float, n: int, rng: np.random.Generator, origin_xy: np.ndarray) -> list[np.ndarray]:
         class_index = CLASSES.index(class_name)
         bin_id = int(age) // self.bin_seconds

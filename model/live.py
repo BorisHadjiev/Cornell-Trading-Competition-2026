@@ -43,11 +43,11 @@ from model.config import (
     REBLD_BASKET,
     SEED,
 )
-from model.damage import DamageFit, outage_hours
-from model.data import damage_vector, limits_from_case, load_case, load_season, sites_from_case
+from model.damage import DamageFit
+from model.data import Season, StormObs, limits_from_case, load_case, load_season, sites_from_case
 from model.filter import FilterFit
 from model.paths import PathLibrary
-from model.value import fit_value
+from model.value import ValueFit
 
 USER_AGENT = "hurricane-research/1.0"
 # Packet: the house takes about 45 real seconds to finish an announcement.
@@ -201,10 +201,38 @@ def _time(value: str) -> np.datetime64:
     return np.datetime64(value, "s")
 
 
+def blank_season(opened: np.ndarray, now: np.datetime64) -> Season:
+    """A season that has only what the socket has delivered. Used when the research pack is absent."""
+    storms = [
+        StormObs(
+            round=rnd,
+            name="",
+            pattern="poison",
+            flip=None,
+            obs=np.zeros((0, 7)),
+            times=np.array([], dtype="datetime64[s]"),
+        )
+        for rnd in (1, 2, 3)
+    ]
+    return Season(
+        number=0,
+        storms=storms,
+        times=np.array([now, now], dtype="datetime64[s]"),
+        prices=np.vstack([opened, opened.copy()]),
+        rounds=np.array([1, 1], dtype=int),
+        settlement=np.zeros(len(NAMES), dtype=float),
+        events=[],
+        season_loss=0.0,
+    )
+
+
 def match_season(fictional_time: str) -> tuple[int, dict] | None:
     """Match a replay to a research directory by the public open date. Do not read damage."""
+    manifest_path = HISTORY / "manifest.json"
+    if not manifest_path.is_file():
+        return None
     day = str(fictional_time)[:10]
-    manifest = json.loads((HISTORY / "manifest.json").read_text())
+    manifest = json.loads(manifest_path.read_text())
     found = None
     for entry in manifest["seasons"]:
         for storm in entry["storms"]:
@@ -302,59 +330,57 @@ def fair_from_state(state: dict, models: Models) -> np.ndarray:
     return models.value.predict(state["open"], *vector)
 
 
-def load_models(fitted: dict, case: dict, skip_season: int | None) -> Models:
-    """Reproduce the published value fit. The path library skips the live season."""
-    manifest = json.loads((HISTORY / "manifest.json").read_text())
-    train = []
-    print("loading training seasons for the published fit", flush=True)
-    for entry in manifest["seasons"]:
-        number = int(entry["season"])
-        if number >= 501:
+def load_library(skip_season: int | None) -> PathLibrary:
+    """Training paths shipped with the model. The live season is left out so we do not draw its own future."""
+    packed = np.load(ROOT / "model" / "path_library.npz")
+    seasons = packed["seasons"]
+    offsets = packed["offsets"]
+    obs = packed["obs"]
+    labels = packed["labels"]
+    labeled = []
+    for index, season_number in enumerate(seasons):
+        if skip_season is not None and int(season_number) == int(skip_season):
             continue
-        train.append(load_season(number, entry))
-        if number % 100 == 0:
-            print(f"  loaded {number}", flush=True)
+        start, stop = int(offsets[index]), int(offsets[index + 1])
+        labeled.append((obs[start:stop], labels[start:stop]))
+    print(f"path library {len(labeled)} storms, excludes season {skip_season}", flush=True)
+    return PathLibrary.from_labeled(labeled)
+
+
+def load_models(fitted: dict, case: dict, skip_season: int | None) -> Models:
+    """Apply the published fit. Anchors live in fitted.json; paths are the shipped library."""
+    runtime = fitted["runtime"]
+    published = float(fitted["value"]["insurance"]["retention_musd"])
+    if abs(float(runtime["retention"]) - published) > 1e-6:
+        raise RuntimeError("runtime retention does not match fitted.json")
     sites = sites_from_case(case)
-    form = fitted["damage"]["form"]
-    dt = float(fitted["damage"]["dt_seconds"])
-    tau = float(fitted["damage"]["outage_threshold"])
     damage = DamageFit(
-        form,
-        dt,
+        fitted["damage"]["form"],
+        float(fitted["damage"]["dt_seconds"]),
         np.array([fitted["damage"]["intercept"][name] for name in PHYSICAL]),
         np.array([fitted["damage"]["slope"][name] for name in PHYSICAL]),
-        tau,
+        float(fitted["damage"]["outage_threshold"]),
     )
-    season_damage, season_outage, season_loss, opens, settlement = [], [], [], [], []
-    storm_damage, storm_outage, storm_loss = [], [], []
-    for season in train:
-        total_d = np.zeros(5)
-        total_o = np.zeros(5)
-        for storm in season.storms:
-            dmg = damage_vector(storm.final_damage)
-            shut = outage_hours(storm.obs, sites, form, dt, tau)
-            storm_damage.append(dmg)
-            storm_outage.append(shut)
-            storm_loss.append(float(storm.final_loss or 0.0))
-            total_d += dmg
-            total_o += shut
-        season_damage.append(total_d)
-        season_outage.append(total_o)
-        season_loss.append(float(season.season_loss))
-        opens.append(season.open_prices)
-        settlement.append(season.settlement)
-    value = fit_value(
-        np.vstack(opens),
-        np.vstack(settlement),
-        np.vstack(season_damage),
-        np.vstack(season_outage),
-        np.asarray(season_loss, dtype=float),
+    value = ValueFit(
+        physical={name: np.asarray(coef, dtype=float) for name, coef in runtime["physical"].items()},
+        recon=(float(runtime["recon"][0]), float(runtime["recon"][1])),
+        mat=(float(runtime["mat"][0]), float(runtime["mat"][1])),
+        gen=(float(runtime["gen"][0]), float(runtime["gen"][1])),
+        retention=float(runtime["retention"]),
+        width=float(runtime["width"]),
+        haven_slope=float(runtime["haven_slope"]),
+        rein_slope=float(runtime["rein_slope"]),
+        mean_damage=float(runtime["mean_damage"]),
+        mean_damage_vec=np.asarray(runtime["mean_damage_vec"], dtype=float),
+        mean_outage=np.asarray(runtime["mean_outage"], dtype=float),
+        mean_recon_curve=float(runtime["mean_recon_curve"]),
+        mean_mat_curve=float(runtime["mean_mat_curve"]),
+        mean_gen_curve=float(runtime["mean_gen_curve"]),
+        mean_haven_pay=float(runtime["mean_haven_pay"]),
+        mean_rein_pay=float(runtime["mean_rein_pay"]),
+        mean_season_loss=float(runtime["mean_season_loss"]),
+        stat_coef={name: np.asarray(coef, dtype=float) for name, coef in runtime["stat_coef"].items()},
     )
-    published = float(fitted["value"]["insurance"]["retention_musd"])
-    if abs(value.retention - published) > 1e-6:
-        raise RuntimeError("rebuilt retention does not match fitted.json")
-    library_seasons = [season for season in train if skip_season is None or season.number != skip_season]
-    print(f"path library excludes season {skip_season}", flush=True)
     filt_raw = fitted["filter"]
     filt = FilterFit(
         mean=np.asarray(filt_raw["feature_mean"], dtype=float),
@@ -380,11 +406,11 @@ def load_models(fitted: dict, case: dict, skip_season: int | None) -> Models:
         loss_slope=float(fitted["revision"]["loss_slope"]),
         loss_coef=np.asarray(fitted["insured_loss_site_coef"]["coef"], dtype=float),
         filt=filt,
-        library=PathLibrary(library_seasons),
+        library=load_library(skip_season),
         limits=limits_from_case(case),
-        mean_damage=np.mean(np.vstack(storm_damage), axis=0),
-        mean_outage=np.mean(np.vstack(storm_outage), axis=0),
-        mean_loss=float(np.mean(storm_loss)),
+        mean_damage=np.asarray(runtime["storm_mean_damage"], dtype=float),
+        mean_outage=np.asarray(runtime["storm_mean_outage"], dtype=float),
+        mean_loss=float(runtime["storm_mean_loss"]),
         median_ri=float(fitted["median_radius_times_intensity"]),
         by_class_damage={name: np.asarray(means["damage_pct"][name], dtype=float) for name in CLASSES},
         by_class_outage={name: np.asarray(means["outage_hours"][name], dtype=float) for name in CLASSES},
@@ -532,11 +558,13 @@ def decide_orders(
 
 
 class Runner:
-    def __init__(self, exchange: Exchange, models: Models, season, opened: np.ndarray, record_path: Path, max_seconds: float) -> None:
+    def __init__(self, exchange: Exchange, models: Models, season, opened: np.ndarray, record_path: Path, max_seconds: float, open_from_feed: bool = False) -> None:
         self.exchange = exchange
         self.models = models
         self.season = season
         self.opened = opened
+        self.open_from_feed = open_from_feed
+        self.open_locked = not open_from_feed
         self.record_path = record_path
         self.max_seconds = max_seconds
         self.quotes: dict[str, dict] = {}
@@ -588,10 +616,19 @@ class Runner:
         if not any(item.get("bid") is not None for item in self.quotes.values()):
             return
         mids = self.opened.copy()
+        quoted = 0
         for index, name in enumerate(NAMES):
             quote = self.quotes.get(name) or {}
             if quote.get("bid") is not None and quote.get("ask") is not None:
                 mids[index] = 0.5 * (float(quote["bid"]) + float(quote["ask"]))
+                quoted += 1
+        if self.open_from_feed and not self.open_locked:
+            if quoted < len(NAMES):
+                return
+            self.opened = mids.copy()
+            self.season.prices[0] = self.opened
+            self.open_locked = True
+            self.note("open", source="first quotes")
         self.season.prices[1] = mids
         try:
             self.refresh_account()
@@ -756,8 +793,6 @@ def main() -> None:
     parser.add_argument("--max-seconds", type=float, default=50 * 60)
     parser.add_argument("--record", default="recording.jsonl")
     args = parser.parse_args()
-    if not (HISTORY / "manifest.json").is_file():
-        raise SystemExit("research history is missing. From the repo root, run python3 scripts/fetch_research_data.py")
     key, url = api_credentials()
     host = resolve_host(url, key)
     case = load_case()
@@ -774,14 +809,22 @@ def main() -> None:
         "pre_turn_fraction": PRE_TURN_FRACTION,
     }), flush=True)
     matched = match_season(str(clock.get("fictional_time")))
-    if matched is None:
-        raise SystemExit("fictional time did not match a research season open date")
-    number, entry = matched
     now = _time(str(clock["fictional_time"]))
-    season, opened = public_view(number, entry, now)
-    print(f"replay season {number} public feed through {clock.get('fictional_time')}", flush=True)
-    models = load_models(fitted, case, skip_season=number)
-    runner = Runner(Exchange(host, key), models, season, opened, Path(args.record), args.max_seconds)
+    if matched is None:
+        number = 0
+        season = blank_season(np.zeros(len(NAMES)), now)
+        opened = season.prices[0].copy()
+        open_from_feed = True
+        print("no local research season; the open will be the first quotes", flush=True)
+    else:
+        number, entry = matched
+        season, opened = public_view(number, entry, now)
+        open_from_feed = False
+        print(f"replay season {number} public feed through {clock.get('fictional_time')}", flush=True)
+    models = load_models(fitted, case, skip_season=number or None)
+    runner = Runner(
+        Exchange(host, key), models, season, opened, Path(args.record), args.max_seconds, open_from_feed,
+    )
     runner.competition_id = clock.get("competition_id")
     try:
         asyncio.run(runner.run())
