@@ -2,9 +2,11 @@
 
 The research backtest is unchanged. This runner does not turn the reserve off,
 does not turn the location scale off, and does not raise revision or known
-damage above PRE_TURN_FRACTION. Severity is the fitted sleeve. The ETF mark
-sleeve is not sent as a directional order. Create or redeem is quantity 1,
-and only after both books still show a locked gap.
+damage above PRE_TURN_FRACTION. After the turn, severity is capped at that
+same fraction of its uncapped target. A reduction crosses the spread. A
+resting order is cancelled at the house half-life of the event that justified
+it. The ETF mark sleeve is not sent as a directional order. Create or redeem
+is quantity 1, and only after both books still show a locked gap.
 
 Run from a clone, after the research pack is fetched:
 
@@ -21,6 +23,7 @@ import argparse
 import asyncio
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,9 +31,10 @@ from pathlib import Path
 
 import numpy as np
 
-from model import portfolio
+from model import backtest, portfolio
 from model.announce import record as record_announcement
 from model.backtest import Models, _state_at, targets_from_state
+from model.house import event_key
 from model.config import (
     ARCH_BASKET,
     CLASSES,
@@ -96,24 +100,143 @@ def redact(text: str, secret: str) -> str:
     return text
 
 
-def limit_price(side: str, bid: float, ask: float, fair: float) -> float | None:
+def limit_price(side: str, bid: float, ask: float, fair: float, reducing: bool = False) -> float | None:
     """Rest on our side. Cross only when the edge through the spread beats the spread.
 
-    LIVE_SPREAD_CROSSING is the research flag and stays false. Crossing is the
-    exception in this function, not a second mode.
+    A reduction does not use that gate. A sell that shrinks a long hits the bid.
+    A buy that shrinks a short lifts the ask. Opening or adding still rests
+    unless the gap beats the spread. LIVE_SPREAD_CROSSING stays false.
     """
     if bid is None or ask is None or not np.isfinite(bid) or not np.isfinite(ask) or ask < bid:
         return None
     spread = float(ask - bid)
     if side == "buy":
-        if not LIVE_SPREAD_CROSSING and float(fair - ask) > spread:
+        if reducing or (not LIVE_SPREAD_CROSSING and float(fair - ask) > spread):
             return float(ask)
         return float(bid)
     if side == "sell":
-        if not LIVE_SPREAD_CROSSING and float(bid - fair) > spread:
+        if reducing or (not LIVE_SPREAD_CROSSING and float(bid - fair) > spread):
             return float(bid)
         return float(ask)
     return None
+
+
+_HALF_LIVES: dict[str, float] | None = None
+_TARGET_LOCK = threading.Lock()
+
+
+def published_half_lives() -> dict[str, float]:
+    """House half-lives published in fitted.json. Not refit."""
+    global _HALF_LIVES
+    if _HALF_LIVES is None:
+        table = json.loads((ROOT / "model" / "fitted.json").read_text())["house_half_life"]
+        _HALF_LIVES = {
+            key: float(table[key]["half_life_seconds"])
+            for key in ("official_advisory", "wire", "impact", "preliminary", "final")
+        }
+    return _HALF_LIVES
+
+
+def stale_order_ids(orders: list[dict], meta: dict[str, dict], now: float, half_lives: dict[str, float]) -> list[str]:
+    """Resting ids older than the half-life of the event that justified them."""
+    found = []
+    for order in orders:
+        oid = str(order.get("id") or order.get("order_id") or "")
+        info = meta.get(oid)
+        if not oid or not info:
+            continue
+        half = half_lives.get(info.get("event_key"))
+        if half is None:
+            continue
+        if float(now) - float(info["placed_at"]) > float(half):
+            found.append(oid)
+    return found
+
+
+def cap_severity_sleeve(sleeves: dict[str, np.ndarray], post_turn: bool, fraction: float) -> None:
+    """Scale pre-rebucket severity to PRE_TURN_FRACTION of the uncapped target.
+
+    Pre-turn already uses that fraction, so this returns without a second cut.
+    Location, revision, known damage, and the composition tilt are not in this sleeve.
+    """
+    if not post_turn:
+        return
+    fraction = float(fraction)
+    if fraction <= PRE_TURN_FRACTION + 1e-12:
+        return
+    sleeves["severity"] *= PRE_TURN_FRACTION / fraction
+
+
+def targets_for_live(state: dict, models: Models, season, bar: int):
+    """Research targets, with the post-turn severity cap applied before rebucket.
+
+    The backtest calls targets_from_state directly and is unchanged.
+    """
+    post_turn = bool(state.get("post_turn"))
+    fraction = float(state.get("fraction", PRE_TURN_FRACTION))
+    with _TARGET_LOCK:
+        original = backtest._rebucket
+
+        def wrapped(sleeves: dict[str, np.ndarray]) -> None:
+            cap_severity_sleeve(sleeves, post_turn, fraction)
+            original(sleeves)
+
+        backtest._rebucket = wrapped
+        try:
+            return targets_from_state(state, models, season, bar)
+        finally:
+            backtest._rebucket = original
+
+
+def target_is_dead(target_qty: float, limit: float) -> bool:
+    """The name is inside the deadband of flat, so the target no longer wants it."""
+    return abs(float(target_qty)) <= DEADBAND_FRACTION * float(limit) + 1e-9
+
+
+def marketable_flatten(name: str, position: float, resting: list[dict], quote: dict | None) -> dict | None:
+    """Cancel this name's rests and, if a position is open, cross out to flat."""
+    cancels = [order.get("id") or order.get("order_id") for order in resting if order.get("id") or order.get("order_id")]
+    qty = int(abs(float(position)) + 1e-9)
+    if qty < 1:
+        if not cancels:
+            return None
+        return {"symbol": name, "cancel": cancels, "flatten": True}
+    side = "sell" if float(position) > 0 else "buy"
+    quote = quote or {}
+    bid, ask = quote.get("bid"), quote.get("ask")
+    if bid is None or ask is None:
+        if not cancels:
+            return None
+        return {"symbol": name, "cancel": cancels, "flatten": True}
+    price = limit_price(side, float(bid), float(ask), 0.0, reducing=True)
+    if price is None:
+        return {"symbol": name, "cancel": cancels, "flatten": True}
+    price = round(float(price), 6)
+    working = [
+        order for order in resting
+        if str(order.get("side")) == side
+        and abs(float(order.get("price", 0.0)) - price) <= 0.05
+        and abs(abs(_signed_qty(order)) - qty) < 1
+    ]
+    if working:
+        extras = [
+            order.get("id") or order.get("order_id")
+            for order in resting
+            if order not in working and (order.get("id") or order.get("order_id"))
+        ]
+        if not extras:
+            return None
+        return {"symbol": name, "cancel": extras, "flatten": True}
+    return {
+        "symbol": name,
+        "side": side,
+        "order_type": "limit",
+        "quantity": qty,
+        "price": price,
+        "cancel": cancels,
+        "flatten": True,
+        "reducing": True,
+    }
 
 
 def locked_etf_edges(quotes: dict[str, dict]) -> dict[str, dict[str, float]]:
@@ -506,6 +629,23 @@ def parse_orders(payload: dict) -> list[dict]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _order_legs(position: float, side: str, quantity: int) -> list[tuple[int, bool]]:
+    """Split one gap into a reducing leg and an adding leg. Only the reducing leg crosses."""
+    closable = 0
+    if side == "sell" and position > 0:
+        closable = int(position + 1e-9)
+    elif side == "buy" and position < 0:
+        closable = int(-position + 1e-9)
+    reduce_qty = min(int(quantity), max(0, closable))
+    add_qty = int(quantity) - reduce_qty
+    legs = []
+    if reduce_qty >= 1:
+        legs.append((reduce_qty, True))
+    if add_qty >= 1:
+        legs.append((add_qty, False))
+    return legs
+
+
 def decide_orders(
     target: np.ndarray,
     fair: np.ndarray,
@@ -514,10 +654,16 @@ def decide_orders(
     quotes: dict[str, dict],
     limits: np.ndarray,
     blocked: set[str] | None,
+    skip: set[str] | None = None,
 ) -> list[dict]:
-    """Desired resting orders. A blocked book (None) sends nothing."""
+    """Desired resting orders. A blocked book (None) sends nothing.
+
+    A sell that shrinks a long is priced at the bid. A buy that shrinks a short
+    is priced at the ask. The spread gate still applies to an open or an add.
+    """
     if blocked is None:
         return []
+    skip = skip or set()
     resting: dict[str, list[dict]] = {name: [] for name in NAMES}
     for order in orders:
         symbol = order.get("symbol")
@@ -525,7 +671,7 @@ def decide_orders(
             resting[symbol].append(order)
     planned = []
     for index, name in enumerate(NAMES):
-        if name in blocked or name not in quotes:
+        if name in blocked or name in skip or name not in quotes:
             continue
         quote = quotes[name]
         bid, ask = quote.get("bid"), quote.get("ask")
@@ -543,25 +689,36 @@ def decide_orders(
         qty = int(min(abs(delta), max(0.0, room_for(limits[index], pos, buy_rest, sell_rest, side))))
         if qty < 1:
             continue
-        price = limit_price(side, float(bid), float(ask), float(fair[index]))
-        if price is None:
+        cancel = [order.get("id") or order.get("order_id") for order in resting[name]]
+        pending = []
+        kept_ids: set[str] = set()
+        for leg_qty, reducing in _order_legs(pos, side, qty):
+            price = limit_price(side, float(bid), float(ask), float(fair[index]), reducing=reducing)
+            if price is None:
+                continue
+            same = [
+                order for order in resting[name]
+                if str(order.get("side")) == side
+                and abs(float(order.get("price", 0.0)) - price) <= 0.05
+                and abs(abs(_signed_qty(order)) - leg_qty) < 1
+            ]
+            if same:
+                kept_ids.update(str(order.get("id") or order.get("order_id") or "") for order in same)
+                continue
+            pending.append({
+                "symbol": name,
+                "side": side,
+                "order_type": "limit",
+                "quantity": leg_qty,
+                "price": round(price, 6),
+                "reducing": reducing,
+            })
+        if not pending:
             continue
-        same = [
-            order for order in resting[name]
-            if str(order.get("side")) == side
-            and abs(float(order.get("price", 0.0)) - price) <= 0.05
-            and abs(abs(_signed_qty(order)) - qty) < 1
-        ]
-        if same:
-            continue
-        planned.append({
-            "symbol": name,
-            "side": side,
-            "order_type": "limit",
-            "quantity": qty,
-            "price": round(price, 6),
-            "cancel": [order.get("id") or order.get("order_id") for order in resting[name]],
-        })
+        cancel_ids = [oid for oid in cancel if str(oid or "") not in kept_ids]
+        for index_leg, leg in enumerate(pending):
+            leg["cancel"] = cancel_ids if index_leg == 0 else []
+            planned.append(leg)
     return planned
 
 
@@ -590,6 +747,10 @@ class Runner:
         self.orders_sent: list[dict] = []
         self.position = {name: 0.0 for name in NAMES}
         self.open_orders: list[dict] = []
+        self.order_meta: dict[str, dict] = {}
+        self.justifying_event: str | None = None
+        self.flattened_on_exit = False
+        self.flatten_order_ids: set[str] = set()
 
     def note(self, kind: str, **fields) -> None:
         row = {"kind": kind, "at": time.time(), **fields}
@@ -607,6 +768,10 @@ class Runner:
             if int(seq) in self.seen_seq:
                 return False
             self.seen_seq.add(int(seq))
+        if message.get("type"):
+            key = event_key(message)
+            if key:
+                self.justifying_event = key
         if message.get("type") == "announcement":
             record_announcement(message, self.announcements)
             if self.announcements:
@@ -620,9 +785,11 @@ class Runner:
         self.position = parse_positions(self.exchange.get("/api/v1/positions"))
         self.open_orders = parse_orders(self.exchange.get("/api/v1/orders/open"))
 
-    def act(self, reason: str) -> None:
-        if not any(item.get("bid") is not None for item in self.quotes.values()):
-            return
+    def _books_ready(self) -> bool:
+        return any(item.get("bid") is not None for item in self.quotes.values())
+
+    def _sync_mark(self) -> bool:
+        """Write the latest mids. False means the open is not locked yet."""
         mids = self.opened.copy()
         quoted = 0
         for index, name in enumerate(NAMES):
@@ -632,53 +799,177 @@ class Runner:
                 quoted += 1
         if self.open_from_feed and not self.open_locked:
             if quoted < len(NAMES):
-                return
+                return False
             self.opened = mids.copy()
             self.season.prices[0] = self.opened
             self.open_locked = True
             self.note("open", source="first quotes")
         self.season.prices[1] = mids
+        return True
+
+    def _expired_ids(self, now: float) -> list[str]:
+        orders = [{"id": oid} for oid in self.order_meta]
+        return stale_order_ids(orders, self.order_meta, now, published_half_lives())
+
+    def _cancel_id(self, oid: str, why: str) -> bool:
+        if not oid:
+            return False
+        if not self.budget.take():
+            self.note("budget", action="cancel")
+            return False
+        try:
+            self.exchange.delete(f"/api/v1/orders/{oid}")
+            self.note("cancel", id=oid, why=why)
+        except RuntimeError as exc:
+            self.order_meta.pop(oid, None)
+            self.errors.append(str(exc))
+            self.note("error", where="cancel", message=str(exc))
+            return "409" in str(exc)
+        self.order_meta.pop(oid, None)
+        return True
+
+    def _cancel_expired(self) -> set[str]:
+        """Cancel rests older than their event's half-life. Returns the symbols freed."""
+        expired = set(self._expired_ids(time.time()))
+        if not expired:
+            return set()
+        symbols: set[str] = set()
+        for order in self.open_orders:
+            oid = str(order.get("id") or order.get("order_id") or "")
+            if oid in expired and order.get("symbol"):
+                symbols.add(str(order["symbol"]))
+        for oid in expired:
+            self._cancel_id(oid, "half_life")
+        self.open_orders = [
+            order for order in self.open_orders
+            if str(order.get("id") or order.get("order_id") or "") not in expired
+        ]
+        return symbols
+
+    def _load_target(self):
+        state = _state_at(self.season, 1, self.models, self.rng)
+        total, sleeves = targets_for_live(state, self.models, self.season, 1)
+        return state, order_target(total, sleeves), fair_from_state(state, self.models)
+
+    def _plans(self, target: np.ndarray, fair: np.ndarray, only: set[str] | None) -> tuple[list[dict], bool]:
+        """Flatten a dead target. Trade the rest. `only` limits a stale replace to those names."""
+        current = np.array([self.position[name] for name in NAMES], dtype=float)
+        dead = {
+            name for index, name in enumerate(NAMES)
+            if target_is_dead(target[index], self.models.limits[index])
+        }
+        plans: list[dict] = []
+        resting: dict[str, list[dict]] = {name: [] for name in NAMES}
+        for order in self.open_orders:
+            symbol = order.get("symbol")
+            if symbol in resting:
+                resting[symbol].append(order)
+        for name in NAMES:
+            if name not in dead:
+                continue
+            if only is not None and name not in only:
+                continue
+            plan = marketable_flatten(name, self.position.get(name, 0.0), resting[name], self.quotes.get(name))
+            if plan:
+                plans.append(plan)
+        adjusted = target.copy()
+        for index, name in enumerate(NAMES):
+            if name in dead:
+                adjusted[index] = current[index]
+        holding = portfolio.deadband_holds(current, adjusted, self.models.limits, DEADBAND_FRACTION)
+        if not holding:
+            blocked = standing_down(self.announcements, time.time())
+            planned = decide_orders(
+                target, fair, self.position, self.open_orders, self.quotes, self.models.limits, blocked, skip=dead,
+            )
+            if only is not None:
+                planned = [order for order in planned if order["symbol"] in only]
+            plans.extend(planned)
+        return plans, holding
+
+    def _submit_plans(self, plans: list[dict]) -> None:
+        for order in plans:
+            order["event_key"] = order.get("event_key") or self.justifying_event
+            self._submit(order)
+
+    def act(self, reason: str) -> None:
+        if reason == "stale" and not self._expired_ids(time.time()):
+            return
+        if not self._books_ready():
+            return
+        if not self._sync_mark():
+            return
         try:
             self.refresh_account()
         except RuntimeError as exc:
             self.errors.append(str(exc))
             self.note("error", where="account", message=str(exc))
             return
-        state = _state_at(self.season, 1, self.models, self.rng)
-        total, sleeves = targets_from_state(state, self.models, self.season, 1)
-        target = order_target(total, sleeves)
-        current = np.array([self.position[name] for name in NAMES], dtype=float)
-        if portfolio.deadband_holds(current, target, self.models.limits, DEADBAND_FRACTION):
-            self.note("hold", reason=reason, round=int(self.season.rounds[1]))
-            self._maybe_etf()
+        expired_symbols = self._cancel_expired()
+        if reason == "stale" and not expired_symbols:
             return
-        fair = fair_from_state(state, self.models)
-        blocked = standing_down(self.announcements, time.time())
-        planned = decide_orders(target, fair, self.position, self.open_orders, self.quotes, self.models.limits, blocked)
-        self.note(
-            "decision",
-            reason=reason,
-            round=int(self.season.rounds[1]),
-            orders=len(planned),
-            post_turn=bool(state.get("post_turn")),
-            stand_down=blocked is None or sorted(blocked),
-        )
-        for order in planned:
-            self._replace(order)
-        self._maybe_etf()
+        try:
+            state, target, fair = self._load_target()
+        except Exception as exc:
+            self.errors.append(str(exc))
+            self.note("error", where="target", message=str(exc))
+            return
+        only = expired_symbols if reason == "stale" else None
+        plans, holding = self._plans(target, fair, only)
+        if holding and not plans:
+            if reason != "stale":
+                self.note("hold", reason=reason, round=int(self.season.rounds[1]))
+                self._maybe_etf()
+            return
+        if reason != "stale":
+            blocked = standing_down(self.announcements, time.time())
+            self.note(
+                "decision",
+                reason=reason,
+                round=int(self.season.rounds[1]),
+                orders=len(plans),
+                post_turn=bool(state.get("post_turn")),
+                stand_down=blocked is None or sorted(blocked),
+            )
+        else:
+            self.note("stale", symbols=sorted(expired_symbols), orders=len(plans))
+        self._submit_plans(plans)
+        if reason != "stale":
+            self._maybe_etf()
+
+    def flatten_dead_targets(self) -> None:
+        """Round left `running`. Flatten every name the target no longer wants."""
+        if self.flattened_on_exit:
+            return
+        self.flattened_on_exit = True
+        if not self._books_ready():
+            self.note("flatten", why="no quotes")
+            return
+        self._sync_mark()
+        try:
+            self.refresh_account()
+            _state, target, _fair = self._load_target()
+        except Exception as exc:
+            self.errors.append(str(exc))
+            self.note("error", where="flatten", message=str(exc))
+            return
+        _plans, _holding = self._plans(target, _fair, None)
+        dead_plans = [plan for plan in _plans if plan.get("flatten")]
+        self.note("flatten", orders=len(dead_plans))
+        self._submit_plans(dead_plans)
+
+    def _submit(self, order: dict) -> None:
+        if "side" not in order:
+            for order_id in order.get("cancel") or []:
+                self._cancel_id(str(order_id), "flatten" if order.get("flatten") else "replace")
+            return
+        self._replace(order)
 
     def _replace(self, order: dict) -> None:
-        for order_id in order["cancel"]:
-            if not order_id or not self.budget.take():
-                if order_id:
-                    self.note("budget", action="cancel")
+        for order_id in order.get("cancel") or []:
+            if not order_id:
                 continue
-            try:
-                self.exchange.delete(f"/api/v1/orders/{order_id}")
-                self.note("cancel", id=order_id, symbol=order["symbol"])
-            except RuntimeError as exc:
-                self.errors.append(str(exc))
-                self.note("error", where="cancel", message=str(exc))
+            self._cancel_id(str(order_id), "flatten" if order.get("flatten") else "replace")
         if not self.budget.take():
             self.note("budget", action="place", symbol=order["symbol"])
             return
@@ -691,6 +982,13 @@ class Runner:
             return
         sent = {**payload, "status": response.get("status") if isinstance(response, dict) else None, "id": _order_id(response)}
         self.orders_sent.append(sent)
+        if sent["id"]:
+            self.order_meta[sent["id"]] = {
+                "placed_at": time.time(),
+                "event_key": order.get("event_key") or self.justifying_event,
+            }
+            if order.get("flatten"):
+                self.flatten_order_ids.add(sent["id"])
         self.note("order", **sent)
 
     def _maybe_etf(self) -> None:
@@ -754,13 +1052,17 @@ class Runner:
             elapsed=clock.get("elapsed_active_seconds"),
         )
         if clock.get("state") != "running":
-            self._halt_state = clock.get("state")
+            await self._flatten_and_stop(clock.get("state"))
             return
         await self._act("timer")
 
-    async def run(self) -> None:
-        import websockets
+    async def _flatten_and_stop(self, state: str | None) -> None:
+        """Flatten dead names before the read loop observes the halt, so those exits are not cancelled."""
+        async with self._act_lock:
+            await asyncio.to_thread(self.flatten_dead_targets)
+            self._halt_state = state
 
+    async def run(self) -> None:
         subscribe = {"action": "subscribe", "symbols": list(NAMES), "channels": ["news", "quotes"]}
         ws_url = self.exchange.host.replace("https://", "wss://", 1) + "/ws/v1/market-data"
         headers = {"X-API-Key": self.exchange.key, "User-Agent": USER_AGENT}
@@ -768,6 +1070,28 @@ class Runner:
         self._act_lock = asyncio.Lock()
         self._halt_state = None
         self._tasks: list[asyncio.Task] = []
+        stale_task = asyncio.create_task(self._stale_loop())
+        try:
+            await self._run_socket(ws_url, headers, subscribe)
+        finally:
+            stale_task.cancel()
+
+    async def _stale_loop(self) -> None:
+        """Reprice a rest once it is older than the event that justified it. Do not churn the rest of the book."""
+        try:
+            while time.time() - self.started < self.max_seconds and self._halt_state is None:
+                await asyncio.sleep(1.0)
+                if self._halt_state is not None:
+                    return
+                if not self._expired_ids(time.time()):
+                    continue
+                await self._act("stale")
+        except asyncio.CancelledError:
+            return
+
+    async def _run_socket(self, ws_url: str, headers: dict, subscribe: dict) -> None:
+        import websockets
+
         while time.time() - self.started < self.max_seconds:
             try:
                 async with websockets.connect(
@@ -824,6 +1148,7 @@ class Runner:
                     elapsed=clock.get("elapsed_active_seconds"),
                 )
                 if not reconnect_after_read_failure(state):
+                    await self._flatten_and_stop(state)
                     self.note("stop", why="state", state=state)
                     return
                 continue
@@ -898,9 +1223,18 @@ def main() -> None:
     try:
         asyncio.run(runner.run())
     finally:
+        keep = set(runner.flatten_order_ids)
         try:
-            runner.exchange.delete("/api/v1/orders/all")
-            runner.note("cancel_all")
+            if keep:
+                runner.refresh_account()
+                for order in runner.open_orders:
+                    oid = str(order.get("id") or order.get("order_id") or "")
+                    if oid and oid not in keep:
+                        runner.exchange.delete(f"/api/v1/orders/{oid}")
+                runner.note("cancel_resting", kept=sorted(keep))
+            else:
+                runner.exchange.delete("/api/v1/orders/all")
+                runner.note("cancel_all")
         except RuntimeError as exc:
             runner.errors.append(str(exc))
             runner.note("error", where="cancel_all", message=str(exc))
