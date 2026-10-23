@@ -1,0 +1,370 @@
+{
+  "name": "Hurricane Season",
+  "days": 3,
+  "map": {
+    "width": 1000,
+    "height": 700
+  },
+  "islands": {
+    "cascadia_prime": {
+      "name": "Cascadia Prime",
+      "polygon": [
+        [
+          300,
+          40
+        ],
+        [
+          620,
+          40
+        ],
+        [
+          680,
+          130
+        ],
+        [
+          600,
+          200
+        ],
+        [
+          340,
+          200
+        ],
+        [
+          260,
+          120
+        ]
+      ]
+    },
+    "coral_key": {
+      "name": "Coral Key",
+      "polygon": [
+        [
+          700,
+          240
+        ],
+        [
+          820,
+          230
+        ],
+        [
+          860,
+          290
+        ],
+        [
+          810,
+          340
+        ],
+        [
+          710,
+          320
+        ]
+      ]
+    },
+    "azure_isle": {
+      "name": "Azure Isle",
+      "polygon": [
+        [
+          760,
+          410
+        ],
+        [
+          900,
+          410
+        ],
+        [
+          930,
+          490
+        ],
+        [
+          870,
+          560
+        ],
+        [
+          770,
+          540
+        ],
+        [
+          730,
+          470
+        ]
+      ]
+    },
+    "palm_atoll": {
+      "name": "Palm Atoll",
+      "polygon": [
+        [
+          140,
+          440
+        ],
+        [
+          330,
+          430
+        ],
+        [
+          380,
+          510
+        ],
+        [
+          330,
+          600
+        ],
+        [
+          180,
+          610
+        ],
+        [
+          110,
+          530
+        ]
+      ]
+    }
+  },
+  "companies": {
+    "PORT": {
+      "name": "Cascadia Pacific Terminals",
+      "about": "A deepwater container port on Cascadia Prime. It has one site: hard infrastructure that is fully exposed to storms.",
+      "kind": "physical",
+      "sites": [
+        {
+          "name": "Deepwater Port",
+          "island": "cascadia_prime",
+          "x": 470,
+          "y": 80,
+          "weight": 1.0
+        }
+      ]
+    },
+    "ISLE": {
+      "name": "Isle Resorts International",
+      "about": "Beach resorts on three islands. The buildings are light construction. Bookings change with the damage.",
+      "kind": "physical",
+      "sites": [
+        {
+          "name": "Coral Key Resort",
+          "island": "coral_key",
+          "x": 780,
+          "y": 285,
+          "weight": 0.34
+        },
+        {
+          "name": "Azure Isle Resort",
+          "island": "azure_isle",
+          "x": 830,
+          "y": 480,
+          "weight": 0.34
+        },
+        {
+          "name": "Palm Atoll Resort",
+          "island": "palm_atoll",
+          "x": 230,
+          "y": 525,
+          "weight": 0.32
+        }
+      ]
+    },
+    "AQUA": {
+      "name": "AquaVida Fisheries",
+      "about": "Fish farms and fishing fleets on Palm Atoll and Coral Key. The farms cannot move. The boats can go to a shelter.",
+      "kind": "physical",
+      "sites": [
+        {
+          "name": "Palm South Dock",
+          "island": "palm_atoll",
+          "x": 240,
+          "y": 605,
+          "weight": 0.3
+        },
+        {
+          "name": "Palm West Farm",
+          "island": "palm_atoll",
+          "x": 130,
+          "y": 540,
+          "weight": 0.25
+        },
+        {
+          "name": "Coral South Fleet",
+          "island": "coral_key",
+          "x": 760,
+          "y": 335,
+          "weight": 0.25
+        },
+        {
+          "name": "Coral West Farm",
+          "island": "coral_key",
+          "x": 705,
+          "y": 290,
+          "weight": 0.2
+        }
+      ]
+    },
+    "GRID": {
+      "name": "GridLock Power & Utilities",
+      "about": "Substations on all islands. Damage is expensive to repair. An outage causes a loss of revenue for as long as it continues.",
+      "kind": "physical",
+      "sites": [
+        {
+          "name": "Cascadia Substation A",
+          "island": "cascadia_prime",
+          "x": 420,
+          "y": 110,
+          "weight": 0.3
+        },
+        {
+          "name": "Cascadia Substation B",
+          "island": "cascadia_prime",
+          "x": 560,
+          "y": 140,
+          "weight": 0.2
+        },
+        {
+          "name": "Coral Substation",
+          "island": "coral_key",
+          "x": 770,
+          "y": 285,
+          "weight": 0.18
+        },
+        {
+          "name": "Azure Substation",
+          "island": "azure_isle",
+          "x": 825,
+          "y": 475,
+          "weight": 0.17
+        },
+        {
+          "name": "Palm Substation",
+          "island": "palm_atoll",
+          "x": 245,
+          "y": 510,
+          "weight": 0.15
+        }
+      ]
+    },
+    "FERRY": {
+      "name": "Archipelago Ferries",
+      "about": "Ferry terminals on all islands. A storm can break only a small part of a terminal. But each hour that a terminal is closed causes a loss of fare revenue.",
+      "kind": "physical",
+      "sites": [
+        {
+          "name": "Cascadia Ferry Terminal",
+          "island": "cascadia_prime",
+          "x": 380,
+          "y": 185,
+          "weight": 0.3
+        },
+        {
+          "name": "Coral Ferry Terminal",
+          "island": "coral_key",
+          "x": 720,
+          "y": 300,
+          "weight": 0.25
+        },
+        {
+          "name": "Azure Ferry Terminal",
+          "island": "azure_isle",
+          "x": 760,
+          "y": 470,
+          "weight": 0.2
+        },
+        {
+          "name": "Palm Ferry Terminal",
+          "island": "palm_atoll",
+          "x": 330,
+          "y": 480,
+          "weight": 0.25
+        }
+      ]
+    },
+    "RECON": {
+      "name": "Reconex Construction",
+      "about": "A heavy civil contractor. It gets the contracts to rebuild the port, the grid and the terminals. Its crews are limited.",
+      "kind": "rebuild",
+      "sites": []
+    },
+    "MAT": {
+      "name": "Materials Holdings",
+      "about": "A supplier of cement, timber and roofing. It sells materials for all repairs on the islands.",
+      "kind": "rebuild",
+      "sites": []
+    },
+    "GEN": {
+      "name": "Backup Power Co.",
+      "about": "Generator rentals. Demand increases with each hour that the grid is down.",
+      "kind": "rebuild",
+      "sites": []
+    },
+    "HAVEN": {
+      "name": "HavenBridge Insurance",
+      "about": "The primary property insurer of the Archipelago. It pays claims above its retention, up to the start of its reinsurance.",
+      "kind": "insurer",
+      "sites": []
+    },
+    "REIN": {
+      "name": "Meridian Re",
+      "about": "A catastrophe reinsurer. It pays the losses of the Archipelago above the HavenBridge limit.",
+      "kind": "insurer",
+      "sites": []
+    }
+  },
+  "etfs": {
+    "ARCH": {
+      "name": "Archipelago Index",
+      "basket": {
+        "PORT": 1,
+        "ISLE": 1,
+        "AQUA": 2,
+        "GRID": 1,
+        "FERRY": 2,
+        "HAVEN": 1
+      }
+    },
+    "REBLD": {
+      "name": "Rebuild & Recovery ETF",
+      "basket": {
+        "RECON": 2,
+        "MAT": 2,
+        "GEN": 1
+      }
+    }
+  },
+  "limits": {
+    "PORT": 200,
+    "ISLE": 300,
+    "AQUA": 500,
+    "GRID": 400,
+    "FERRY": 800,
+    "RECON": 500,
+    "MAT": 700,
+    "GEN": 600,
+    "HAVEN": 250,
+    "REIN": 200,
+    "ARCH": 50,
+    "REBLD": 100
+  },
+  "outlooks": {
+    "direct": "Direct strike",
+    "chain": "Island chain",
+    "recurve": "Recurve",
+    "stall": "Stall",
+    "eyewall": "Eyewall replacement",
+    "erratic": "Erratic"
+  },
+  "timing": {
+    "pre_storm": 60,
+    "storm": 480,
+    "aftermath": 240,
+    "obs_every": 2,
+    "track_every": 20,
+    "advisory_first": 30,
+    "advisory_every": 60,
+    "prelim_report": 30,
+    "final_report": 40
+  },
+  "storm": {
+    "dissipate": 60,
+    "start": [
+      500,
+      740
+    ],
+    "start_jitter": 120
+  }
+}

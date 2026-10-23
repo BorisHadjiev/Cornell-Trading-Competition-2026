@@ -1,0 +1,9 @@
+# Bulk Hurricane Season research data. Fetch with:
+#   python3 scripts/fetch_research_data.py
+hurricane-season-research.zip
+hurricane-season-research/history/
+
+# Local testnet recordings and caches
+recording.jsonl
+__pycache__/
+*.pyc
