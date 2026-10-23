@@ -33,6 +33,8 @@ A round-1 price against season-end settlement is not a house mistake. Later stor
 | Revision | Preliminary damage vs the final report | 35% size. Loses money if the fill is late |
 | Known damage | Trade assessed damage after the final report | 35% size. Loses money if the fill is late |
 | ETF gap | House mark vs the basket | Off until the live book shows a gap after the spread |
+| Limit reserve | Half of PORT, ARCH, and REIN held back from the first advisory | On. Kept on the crowded-fill test |
+| Pair over location | Shrink the one-name location trade when a composition or insurer pair is already on | On. Kept together with the reserve |
 
 Held-out season profit after the 35% cut, in case dollars, 100 seasons:
 
@@ -43,6 +45,8 @@ Held-out season profit after the 35% cut, in case dollars, 100 seasons:
 | 5 marks later | 2891 | 2597 | −3402 |
 
 The one-mark row is the ceiling if we are filled immediately in an empty book. It is not a setting we can choose. Other teams make the fill later and share the house’s mistake. A serious competitor is closer to the five-mark row than to 7,000. The starter bot (sell an island at 10% of the limit when the advisory is at least 80%) made about 350 in a typical season.
+
+If the obvious island short fills 5 marks later and the pair trades still fill on the next mark, the book before the reserve was mean 6,702, median 6,189, 10th percentile 1,267. With the reserve and the smaller location add, that crowded book is mean 5,676, median 5,060, 10th percentile 354. Both rules beat an all-late book in all 4 blocks of 25 seasons. The empty-book next-mark result falls from 7,374 / 7,137 / 1,330 to 6,336 / 5,824 / 1,207. That drop is the size we held back.
 
 ## Other traders
 
