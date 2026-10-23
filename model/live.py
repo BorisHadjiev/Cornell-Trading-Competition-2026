@@ -54,6 +54,9 @@ USER_AGENT = "hurricane-research/1.0"
 ANNOUNCEMENT_STAND_DOWN_SECONDS = 45.0
 # Leave a few actions under the team cap of 180 per minute.
 TEAM_ACTION_BUDGET = 170
+# A missed pong must not close the socket during the last two real minutes of a round.
+PING_INTERVAL_SECONDS = 20.0
+PING_TIMEOUT_SECONDS = 120.0
 ENV_PATH = Path("/tmp/ctc-bot.env")
 FALLBACK_HOST = "https://cornelltradingcompetition.org"
 ROOT = Path(__file__).resolve().parent.parent
@@ -179,6 +182,11 @@ class ActionBudget:
             return False
         self.times.append(now)
         return True
+
+
+def reconnect_after_read_failure(state: str | None) -> bool:
+    """Stay up while the competition is running. One failed read is not a stop."""
+    return state is None or state == "running"
 
 
 def standing_down(log: list[dict], now: float) -> set[str] | None:
@@ -705,6 +713,51 @@ class Runner:
         self.etf_done = True
         self.note("etf", symbol=etf, side=side, quantity=1, edge=edge, status=response.get("status"))
 
+    async def _act(self, reason: str) -> None:
+        """One decision at a time, off the read loop so a slow order burst cannot stall the socket."""
+        async with self._act_lock:
+            if self._halt_state is not None:
+                return
+            await asyncio.to_thread(self.act, reason)
+
+    def _track(self, task: asyncio.Task) -> None:
+        self._tasks.append(task)
+
+        def _done(done: asyncio.Task) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is None:
+                return
+            message = redact(str(exc), self.exchange.key)
+            self.errors.append(message)
+            self.note("error", where="task", message=message)
+
+        task.add_done_callback(_done)
+
+    def _kick(self, reason: str) -> None:
+        self._track(asyncio.create_task(self._act(reason)))
+
+    async def _clock(self) -> None:
+        try:
+            clock = await asyncio.to_thread(self.exchange.get, "/api/v1/competitions/time")
+        except Exception as exc:
+            message = redact(str(exc), self.exchange.key)
+            self.errors.append(message)
+            self.note("error", where="clock", message=message)
+            return
+        self.competition_id = clock.get("competition_id")
+        self.note(
+            "clock",
+            state=clock.get("state"),
+            fictional_time=clock.get("fictional_time"),
+            elapsed=clock.get("elapsed_active_seconds"),
+        )
+        if clock.get("state") != "running":
+            self._halt_state = clock.get("state")
+            return
+        await self._act("timer")
+
     async def run(self) -> None:
         import websockets
 
@@ -712,9 +765,19 @@ class Runner:
         ws_url = self.exchange.host.replace("https://", "wss://", 1) + "/ws/v1/market-data"
         headers = {"X-API-Key": self.exchange.key, "User-Agent": USER_AGENT}
         self.record_path.parent.mkdir(parents=True, exist_ok=True)
+        self._act_lock = asyncio.Lock()
+        self._halt_state = None
+        self._tasks: list[asyncio.Task] = []
         while time.time() - self.started < self.max_seconds:
             try:
-                async with websockets.connect(ws_url, additional_headers=headers, open_timeout=15) as ws:
+                async with websockets.connect(
+                    ws_url,
+                    additional_headers=headers,
+                    open_timeout=15,
+                    ping_interval=PING_INTERVAL_SECONDS,
+                    ping_timeout=PING_TIMEOUT_SECONDS,
+                    max_queue=None,
+                ) as ws:
                     self.connected = True
                     await ws.send(json.dumps(subscribe))
                     self.note("connected", host=self.exchange.host)
@@ -724,40 +787,46 @@ class Runner:
                             return
                         data = json.loads(frame)
                         self.record_frame(data)
+                        if self._halt_state is not None:
+                            self.note("stop", why="state", state=self._halt_state)
+                            return
                         kind = data.get("type")
                         if kind == "quote":
                             self.quotes[data["symbol"]] = data
                             if len(self.quotes) >= len(NAMES) and self.last_decision == 0.0:
                                 self.last_decision = time.time()
-                                await asyncio.to_thread(self.act, "quotes")
+                                self._kick("quotes")
                         elif kind == "news" and isinstance(data.get("message"), dict):
                             if self.on_news(data["message"]):
-                                await asyncio.to_thread(self.act, data["message"].get("type"))
+                                self._kick(str(data["message"].get("type") or "news"))
                         now = time.time()
                         if now - self.last_decision >= 60.0 and self.quotes:
                             self.last_decision = now
-                            clock = await asyncio.to_thread(self.exchange.get, "/api/v1/competitions/time")
-                            self.competition_id = clock.get("competition_id")
-                            self.note(
-                                "clock",
-                                state=clock.get("state"),
-                                fictional_time=clock.get("fictional_time"),
-                                elapsed=clock.get("elapsed_active_seconds"),
-                            )
-                            if clock.get("state") != "running":
-                                self.note("stop", why="state", state=clock.get("state"))
-                                return
-                            await asyncio.to_thread(self.act, "timer")
-            except (OSError, Exception) as exc:
+                            self._track(asyncio.create_task(self._clock()))
+            except Exception as exc:
                 message = redact(str(exc), self.exchange.key)
-                if "websockets" in type(exc).__module__ or isinstance(exc, OSError):
-                    self.errors.append(message)
-                    self.note("disconnected", message=message)
-                    await asyncio.sleep(2)
-                    continue
                 self.errors.append(message)
-                self.note("error", where="loop", message=message)
-                return
+                self.note("disconnected", message=message)
+                if self._halt_state is not None:
+                    self.note("stop", why="state", state=self._halt_state)
+                    return
+                try:
+                    clock = await asyncio.to_thread(self.exchange.get, "/api/v1/competitions/time")
+                except Exception as clock_exc:
+                    self.note("error", where="clock", message=redact(str(clock_exc), self.exchange.key))
+                    continue
+                self.competition_id = clock.get("competition_id")
+                state = clock.get("state")
+                self.note(
+                    "clock",
+                    state=state,
+                    fictional_time=clock.get("fictional_time"),
+                    elapsed=clock.get("elapsed_active_seconds"),
+                )
+                if not reconnect_after_read_failure(state):
+                    self.note("stop", why="state", state=state)
+                    return
+                continue
         self.note("stop", why="time")
 
 

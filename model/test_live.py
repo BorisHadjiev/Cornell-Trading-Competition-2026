@@ -65,6 +65,12 @@ class OrderRuleTests(unittest.TestCase):
         stale = live.standing_down([{"received_at": now - 90, "symbols": ["PORT"]}], now)
         self.assertEqual(stale, set())
 
+    def test_a_ping_timeout_cannot_drop_the_last_two_minutes(self) -> None:
+        self.assertGreaterEqual(live.PING_TIMEOUT_SECONDS, 120.0)
+        self.assertTrue(live.reconnect_after_read_failure("running"))
+        self.assertTrue(live.reconnect_after_read_failure(None))
+        self.assertFalse(live.reconnect_after_read_failure("ready"))
+
     def test_action_budget_stops_under_the_team_cap(self) -> None:
         budget = live.ActionBudget(cap=2)
         self.assertTrue(budget.take(0.0))
