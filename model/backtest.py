@@ -185,7 +185,8 @@ def _state_at(season, bar: int, models: Models, rng: np.random.Generator) -> dic
 
     turned = first_turn_age(obs, models_turn()) is not None if len(obs) else False
     full_age = models.storm_seconds - models.dissipate_seconds
-    fraction = 1.0 if (final is not None or turned or (age is not None and age >= full_age)) else PRE_TURN_FRACTION
+    post_turn = final is not None or turned or (age is not None and age >= full_age)
+    fraction = 1.0 if post_turn else PRE_TURN_FRACTION
     # Born-erratic has no special detector. A high erratic probability is just the filter.
     if hazard > 0.5 and final is None:
         fraction = min(fraction, PRE_TURN_FRACTION + (1.0 - PRE_TURN_FRACTION) * (1.0 - hazard))
@@ -199,6 +200,7 @@ def _state_at(season, bar: int, models: Models, rng: np.random.Generator) -> dic
         "fraction": fraction,
         "near": near,
         "final": final is not None,
+        "post_turn": post_turn,
         "prelim": prelim is not None and final is None,
         "location": location,
         "sev": accumulate(mean_d, mean_o, mean_l),
@@ -291,7 +293,69 @@ def _scenario_value(models: Models, open_prices, rnd: int, finals: dict, class_n
     return models.value.predict(open_prices, damage, outage, loss)
 
 
-def targets_from_state(state: dict, models: Models, season, bar: int) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+def _cap_name(sleeves: dict[str, np.ndarray], index: int, cap: float, only: set[str] | None = None) -> None:
+    """Shrink `only` (or every sleeve) on one name until their sum is inside `cap`."""
+    keys = [name for name in sleeves if only is None or name in only]
+    total = float(sum(sleeves[name][index] for name in keys))
+    if abs(total) <= cap + 1e-9 or abs(total) < 1e-12:
+        return
+    scale = cap / abs(total)
+    for name in keys:
+        sleeves[name][index] *= scale
+
+
+def _reserve_capacity(sleeves: dict[str, np.ndarray], post_turn: bool, limits: np.ndarray) -> None:
+    """Hold half of PORT, ARCH, and REIN for post-turn location and for REIN.
+
+    Before the turn, no sleeve may use more than half the limit on those names,
+    so the first advisory cannot take the whole line. After the turn, only the
+    location sleeve may use PORT's and ARCH's reserved half, and only the kink
+    sleeve may use REIN's. Half is the stated reserve, not a fitted knob.
+    """
+    allowed = {"PORT": {"location"}, "ARCH": {"location"}, "REIN": {"insurer_kink"}}
+    for name, allow in allowed.items():
+        index = IDX[name]
+        full = float(limits[index])
+        half = 0.5 * full
+        if not post_turn:
+            _cap_name(sleeves, index, half, None)
+            continue
+        _cap_name(sleeves, index, half, {sleeve for sleeve in sleeves if sleeve not in allow})
+        other = float(sum(sleeves[sleeve][index] for sleeve in sleeves if sleeve not in allow))
+        allowed_sum = float(sum(sleeves[sleeve][index] for sleeve in allow if sleeve in sleeves))
+        if abs(other + allowed_sum) <= full + 1e-9 or abs(allowed_sum) < 1e-12:
+            continue
+        lo, hi = 0.0, 1.0
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if abs(other + mid * allowed_sum) <= full + 1e-6:
+                lo = mid
+            else:
+                hi = mid
+        for sleeve in allow:
+            if sleeve in sleeves:
+                sleeves[sleeve][index] *= lo
+
+
+def _scale_location_where_paired(sleeves: dict[str, np.ndarray], near_kink: bool) -> None:
+    """Cut the location add on a name that already has a composition or kink target.
+
+    Uses the existing disagree scale. Does not touch severity, revision, or known damage.
+    """
+    from model.config import DISAGREE_SCALE
+
+    for index, name in enumerate(NAMES):
+        paired = abs(sleeves["composition"][index]) > 1e-8 or (near_kink and name in ("HAVEN", "REIN"))
+        if paired:
+            sleeves["location"][index] *= DISAGREE_SCALE
+
+
+def targets_from_state(
+    state: dict,
+    models: Models,
+    season,
+    bar: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Share targets and the sleeve decomposition. `season` is used only for scenario finals already in the feed."""
     t = season.times[bar]
     finals = {}
@@ -344,6 +408,9 @@ def targets_from_state(state: dict, models: Models, season, bar: int) -> tuple[n
     total = sum(sleeves.values())
     total = np.clip(total, -models.limits, models.limits)
     sleeves = portfolio._scale_to_match(sleeves, total)
+    # A composition or kink target already on a name cuts that name's location add.
+    # This runs before rebucket, while location still holds the rebuilder and insurer names.
+    _scale_location_where_paired(sleeves, bool(state["near"]))
     _rebucket(sleeves)
     # Fill-delay check: revision and known damage collapse by a 5-mark fill.
     # Size those two sleeves at the fractional knob. Do not scale severity up.
@@ -352,6 +419,9 @@ def targets_from_state(state: dict, models: Models, season, bar: int) -> tuple[n
     # house mark. A live book would be required before crossing a spread.
     sleeves["revision"] *= PRE_TURN_FRACTION
     sleeves["known_damage"] *= PRE_TURN_FRACTION
+    # Half of PORT, ARCH, and REIN stays unused until the turn, then only location
+    # (PORT, ARCH) or the kink (REIN) may take it. The first advisory cannot use it.
+    _reserve_capacity(sleeves, bool(state.get("post_turn")), models.limits)
     total = sum(sleeves.values())
     return total, sleeves
 
