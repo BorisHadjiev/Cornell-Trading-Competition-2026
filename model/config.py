@@ -106,7 +106,10 @@ LIVE_SIZE_FRACTION = 0.5
 # season against 8,000 on the research marks. The research replay has no other participants and
 # cannot score this rule; it is judged on live seasons. None turns it off.
 LIVE_EDGE_FLOOR_DOLLARS = 1.0
-LIVE_EDGE_FLOOR_SPREADS = 2.0
+# Competition day: live spreads are 5-10x the testnet's (PORT and HAVEN about $2.80), so two
+# spreads blocked a +4.14 PORT edge and left only HAVEN tradeable. The bot rests inside the touch
+# rather than crossing, so one spread is the scale of the noise it must beat, not two.
+LIVE_EDGE_FLOOR_SPREADS = 1.0
 
 # Resting orders. A rest is cancelled when the quote has moved away from it, but never sooner
 # than MIN_REST_SECONDS: the fitted house half-life after a damage report is 4 s, and a 4-second
