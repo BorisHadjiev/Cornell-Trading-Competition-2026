@@ -551,6 +551,14 @@ class StateAndCatchUpTests(unittest.TestCase):
         runner._second()          # and must not log the same error twice
         self.assertEqual(notes, [("error", "clock"), ("error", "book_log")])
 
+    def test_bands_scale_with_the_size_fraction(self) -> None:
+        limits = np.full(len(NAMES), 200.0)
+        self.assertTrue(np.allclose(live.band_limits(limits, 0.5), 100.0))
+        self.assertTrue(np.array_equal(live.band_limits(limits, None), limits))
+        # At half size a -27 PORT target is a wanted position, not a dead one.
+        self.assertFalse(live.target_is_dead(-27.0, live.band_limits(limits, 0.5)[0]))
+        self.assertTrue(live.target_is_dead(-7.0, live.band_limits(limits, 0.5)[0]))
+
     def test_live_size_fraction_scales_the_target_only(self) -> None:
         target = np.full(len(NAMES), 100.0)
         self.assertTrue(np.allclose(live.scale_target(target, 0.5), 50.0))

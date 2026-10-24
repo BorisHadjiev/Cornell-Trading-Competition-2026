@@ -314,6 +314,19 @@ def scale_target(target: np.ndarray, fraction: float | None = LIVE_SIZE_FRACTION
     return target * float(fraction)
 
 
+def band_limits(limits: np.ndarray, fraction: float | None = LIVE_SIZE_FRACTION) -> np.ndarray:
+    """Limits the deadband and the dead-target test are measured against.
+
+    The targets are scaled by LIVE_SIZE_FRACTION; the bands must scale with them, or at half size
+    an 8% band of the full limit is 16% of every target and a wanted position reads as "dead" and
+    is flattened. Live 24 Oct, competition round 1: a -59 PORT short was bought back at 61.13 with
+    fair at 57.45 for exactly this reason. Position-limit room still uses the full limits.
+    """
+    if fraction is None or fraction <= 0:
+        return limits
+    return limits * float(fraction)
+
+
 def target_is_dead(target_qty: float, limit: float) -> bool:
     """The name is inside the deadband of flat, so the target no longer wants it."""
     return abs(float(target_qty)) <= DEADBAND_FRACTION * float(limit) + 1e-9
@@ -1868,9 +1881,10 @@ class Runner:
     def _plans(self, target: np.ndarray, fair: np.ndarray, only: set[str] | None) -> tuple[list[dict], bool]:
         """Flatten a dead target. Trade the rest. `only` limits a stale replace to those names."""
         current = np.array([self.position[name] for name in NAMES], dtype=float)
+        bands = band_limits(self.models.limits)
         dead = {
             name for index, name in enumerate(NAMES)
-            if target_is_dead(target[index], self.models.limits[index])
+            if target_is_dead(target[index], bands[index])
         }
         plans: list[dict] = []
         resting: dict[str, list[dict]] = {name: [] for name in NAMES}
@@ -1886,13 +1900,13 @@ class Runner:
             plan = marketable_flatten(name, self.position.get(name, 0.0), resting[name], self._exit_quotes().get(name))
             if plan:
                 plans.append(plan)
-        target = hold_inside_band(target, current, self.models.limits, dead)
+        target = hold_inside_band(target, current, bands, dead)
         target = apply_edge_floor(target, current, fair, self.quotes)
         adjusted = target.copy()
         for index, name in enumerate(NAMES):
             if name in dead:
                 adjusted[index] = current[index]
-        holding = portfolio.deadband_holds(current, adjusted, self.models.limits, DEADBAND_FRACTION)
+        holding = portfolio.deadband_holds(current, adjusted, bands, DEADBAND_FRACTION)
         if not holding:
             blocked = standing_down(self.announcements, time.time())
             planned = decide_orders(
