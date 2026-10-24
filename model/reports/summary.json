@@ -1,0 +1,229 @@
+{
+  "holdout": "seasons 501-600",
+  "fill": "next house mark after the decision; no spread. revision and known_damage sized at PRE_TURN_FRACTION (0.35). Half of PORT, ARCH, and REIN is reserved until the turn. Location is scaled down on a name that already has a composition or kink target.",
+  "our": {
+    "mean": 6336.062465101224,
+    "median": 5824.016495639877,
+    "p10": 1207.4762075003339
+  },
+  "baseline": {
+    "mean": 256.43699999999995,
+    "median": 347.3499999999999,
+    "p10": -626.41
+  },
+  "oracle_value_error": {
+    "training_mae": 1.245851298040142,
+    "starting_price_mae": 7.961603333333333,
+    "holdout_mae": 1.2442641855817043,
+    "holdout_starting_price_mae": 8.4168
+  },
+  "damage_error": {
+    "form": "gauss",
+    "by_company": {
+      "PORT": {
+        "mae": 6.9661988155312065,
+        "mean_baseline_mae": 18.722435022222218
+      },
+      "ISLE": {
+        "mae": 3.5429858228411284,
+        "mean_baseline_mae": 9.3171916
+      },
+      "AQUA": {
+        "mae": 7.45220277642366,
+        "mean_baseline_mae": 13.329579333333326
+      },
+      "GRID": {
+        "mae": 5.172689656869813,
+        "mean_baseline_mae": 8.079214577777778
+      },
+      "FERRY": {
+        "mae": 4.30897725737479,
+        "mean_baseline_mae": 9.130243600000002
+      }
+    },
+    "forms": {
+      "exp": {
+        "PORT": 8.509850346147408,
+        "ISLE": 3.726662582917142,
+        "AQUA": 7.011021217031013,
+        "GRID": 4.926539164370217,
+        "FERRY": 5.051719841967102
+      },
+      "gauss": {
+        "PORT": 6.9661988155312065,
+        "ISLE": 3.5429858228411284,
+        "AQUA": 7.45220277642366,
+        "GRID": 5.172689656869813,
+        "FERRY": 4.30897725737479
+      }
+    }
+  },
+  "revision_mae": {
+    "PORT": 5.061326310511047,
+    "ISLE": 2.3827467083869873,
+    "AQUA": 3.8083131396786816,
+    "GRID": 3.456145858169739,
+    "FERRY": 3.335185255593702
+  },
+  "filter": {
+    "0-30s": {
+      "model": 1.9504679903885098,
+      "frequency": 1.673937801370297,
+      "n": 900
+    },
+    "30-90s": {
+      "model": 0.6809677124284632,
+      "frequency": 1.67134183374141,
+      "n": 1800
+    },
+    "after_first_turn": {
+      "model": 0.32211256247546416,
+      "frequency": 1.7043582374060453,
+      "n": 13858
+    }
+  },
+  "sleeve_means": {
+    "severity": 171.16132283938495,
+    "location": 2129.09102144808,
+    "insurer_kink": 1595.2777301153335,
+    "composition": 1266.2894859304088,
+    "revision": 147.52980165654523,
+    "known_damage": 93.4756640996958,
+    "etf_gap": 933.2374390117769
+  },
+  "unsatisfied": [],
+  "fill_delay_after_cut": {
+    "1": {
+      "book": {
+        "mean": 7374.0252131843135,
+        "median": 7136.505189439719,
+        "p10": 1329.9744048011792
+      },
+      "sleeves": {
+        "severity": 321.93395513357456,
+        "location": 2157.4789631806243,
+        "insurer_kink": 1899.8694350053418,
+        "composition": 1274.7867342363597,
+        "revision": 172.46037486358532,
+        "known_damage": 99.62664256666784,
+        "etf_gap": 1447.8691081981628
+      }
+    },
+    "2": {
+      "book": {
+        "mean": 4046.4970892363704,
+        "median": 3655.0625542824773,
+        "p10": -1772.1391013784423
+      },
+      "sleeves": {
+        "severity": 614.1415732121236,
+        "location": 1106.0760126513019,
+        "insurer_kink": 889.5763328213127,
+        "composition": 690.7906533818084,
+        "revision": -23.073963192194878,
+        "known_damage": -142.66235674250456,
+        "etf_gap": 911.6488371045235
+      }
+    },
+    "5": {
+      "book": {
+        "mean": 2891.0578633270657,
+        "median": 2597.1399949615275,
+        "p10": -3402.4827528069036
+      },
+      "sleeves": {
+        "severity": 654.434183567558,
+        "location": 893.7767277820329,
+        "insurer_kink": 819.6560515908837,
+        "composition": 626.654365952335,
+        "revision": -24.046150954270214,
+        "known_damage": -128.23919161605303,
+        "etf_gap": 48.8218770045802
+      }
+    },
+    "note": "Book after the 0.35 size cut and before the PORT/ARCH/REIN reserve and the location scale. The 5-mark row is the crowding reference (median 2597, p10 -3402)."
+  },
+  "crowding": {
+    "note": "Hybrid fill: a short that overlaps the >=80% official island-advisory rule waits 5 marks. Composition and insurer_kink still fill at the next mark. Other changes fill at the next mark. Reserve was judged first. Location scale was judged on top of reserve. Both cleared the 5-mark book on median, p10, and all 4 blocks of 25 seasons.",
+    "reference_5mark": {
+      "mean": 2891.0578633270657,
+      "median": 2597.1399949615275,
+      "p10": -3402.4827528069036,
+      "blocks_positive_vs_5mark": null,
+      "sleeves": {
+        "severity": 654.434183567558,
+        "location": 893.7767277820329,
+        "insurer_kink": 819.6560515908837,
+        "composition": 626.654365952335,
+        "revision": -24.046150954270214,
+        "known_damage": -128.23919161605303,
+        "etf_gap": 48.8218770045802
+      }
+    },
+    "hybrid_before_rules": {
+      "mean": 6701.901400818545,
+      "median": 6188.816619554071,
+      "p10": 1267.3220230398824,
+      "blocks_positive_vs_5mark": 4,
+      "sleeves": {
+        "severity": 131.2667569042612,
+        "location": 1869.3518370985694,
+        "insurer_kink": 1900.3049012086071,
+        "composition": 1276.0044047685792,
+        "revision": 50.604832567449506,
+        "known_damage": 17.402992838888593,
+        "etf_gap": 1456.965675432192
+      }
+    },
+    "reserve_only": {
+      "mean": 5984.626668413225,
+      "median": 5307.92505609253,
+      "p10": 931.560836308677,
+      "blocks_positive_vs_5mark": 4,
+      "sleeves": {
+        "severity": -5.311195719234304,
+        "location": 1845.4883631900111,
+        "insurer_kink": 1898.2187218276056,
+        "composition": 1275.7072144913914,
+        "revision": 23.303130990768086,
+        "known_damage": 11.421774043557752,
+        "etf_gap": 935.7986595891249
+      }
+    },
+    "location_scale_only": {
+      "mean": 6407.441434583207,
+      "median": 6184.73012552181,
+      "p10": 43.58781268442468,
+      "blocks_positive_vs_5mark": 4,
+      "sleeves": {
+        "severity": 130.40236749307348,
+        "location": 1875.279719343196,
+        "insurer_kink": 1606.7710071217275,
+        "composition": 1266.9983799478928,
+        "revision": 52.1119540869493,
+        "known_damage": 17.325048041135545,
+        "etf_gap": 1458.5529585492366
+      }
+    },
+    "shipped_reserve_and_location_scale": {
+      "mean": 5675.81688163693,
+      "median": 5059.983408092126,
+      "p10": 353.75028641694445,
+      "blocks_positive_vs_5mark": 4,
+      "sleeves": {
+        "severity": -4.306136732743976,
+        "location": 1846.5784867658417,
+        "insurer_kink": 1594.1615564369097,
+        "composition": 1266.5684675667187,
+        "revision": 24.892721178991252,
+        "known_damage": 11.24252441392993,
+        "etf_gap": 936.6792620072841
+      }
+    },
+    "one_mark_after_rules": {
+      "mean": 6336.062465101224,
+      "median": 5824.016495639877,
+      "p10": 1207.4762075003339
+    }
+  }
+}
