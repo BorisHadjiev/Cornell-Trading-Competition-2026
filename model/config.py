@@ -84,6 +84,12 @@ LIVE_PER_NAME_DEADBAND = 0.15
 # the season mark and position-times-mid was -300 to -1,000 a season, most of it from crosses.
 LIVE_CROSS_AT_TOUCH_DEPTH = True
 
+# Live only: every target is scaled by this before the deadband and the edge floor. The research
+# sizing (tanh of edge over 3 dollars, times the limit) reaches the position limits on a 5-dollar
+# edge, and live season 250 (24 Oct) rode a wrong-way book at the limits to -4,548. Half size
+# halves both the expectation and the swing; it is a variance control, not a fit.
+LIVE_SIZE_FRACTION = 0.5
+
 # Live only: an edge floor. A name is opened, or reversed through flat, only when the model's
 # edge against the live mid is at least the larger of LIVE_EDGE_FLOOR_DOLLARS and
 # LIVE_EDGE_FLOOR_SPREADS times the quoted spread. Reductions and same-side adds are not gated.

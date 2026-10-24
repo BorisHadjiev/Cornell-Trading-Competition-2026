@@ -523,6 +523,30 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual([(o["quantity"], o["price"]) for o in plain], [(100, 10.0)])
         self.assertIsNone(live.touch_depth({"bid": 10.0, "ask": 10.2}, "sell"))
 
+    def test_live_size_fraction_scales_the_target_only(self) -> None:
+        target = np.full(len(NAMES), 100.0)
+        self.assertTrue(np.allclose(live.scale_target(target, 0.5), 50.0))
+        self.assertTrue(np.array_equal(live.scale_target(target, None), target))
+        self.assertTrue(np.array_equal(live.scale_target(target, 1.0), target))
+
+    def test_first_competition_id_after_a_gap_start_builds_the_season(self) -> None:
+        runner = live.Runner.__new__(live.Runner)
+        runner.competition_id = None
+        runner.fictional_time = None
+        runner.clock_state = None
+        runner.round_open = False
+        runner.flattened_on_exit = True
+        built = []
+        runner._new_season = lambda clock: built.append(clock.get("competition_id"))
+        runner.note = lambda *a, **k: None
+        runner._begin_round = lambda: None
+        runner.close_round = lambda: None
+        runner._apply_clock({"competition_id": "abc", "state": "ready", "fictional_time": "1777-06-11T09:30:00"})
+        self.assertEqual(built, ["abc"])
+        self.assertEqual(runner.competition_id, "abc")
+        runner._apply_clock({"competition_id": "abc", "state": "running", "fictional_time": "1777-06-11T09:31:00"})
+        self.assertEqual(built, ["abc"])
+
     def test_edge_floor_blocks_small_opens_and_turns_a_small_reversal_into_a_flatten(self) -> None:
         port, isle, aqua, grid = (NAMES.index(n) for n in ("PORT", "ISLE", "AQUA", "GRID"))
         current = np.zeros(len(NAMES)); target = np.zeros(len(NAMES)); fair = np.zeros(len(NAMES))

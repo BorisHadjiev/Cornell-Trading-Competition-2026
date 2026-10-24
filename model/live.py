@@ -68,6 +68,7 @@ from model.config import (
     LIVE_FLATTEN_AT_ROUND_END,
     LIVE_ONE_ENTRY_PER_ROUND,
     LIVE_PER_NAME_DEADBAND,
+    LIVE_SIZE_FRACTION,
     LIVE_SPREAD_CROSSING,
     MIN_REST_SECONDS,
     NAME_LOSS_CAP,
@@ -296,6 +297,13 @@ def apply_edge_floor(target: np.ndarray, current: np.ndarray, fair: np.ndarray, 
         if edge * side < floor:
             out[index] = 0.0 if reversing else have
     return out
+
+
+def scale_target(target: np.ndarray, fraction: float | None = LIVE_SIZE_FRACTION) -> np.ndarray:
+    """Live size fraction. None or 1 sends the research size."""
+    if fraction is None or abs(float(fraction) - 1.0) < 1e-12:
+        return target
+    return target * float(fraction)
 
 
 def target_is_dead(target_qty: float, limit: float) -> bool:
@@ -1586,7 +1594,7 @@ class Runner:
     def _load_target(self):
         state = _state_at(self.season, 1, self.models, self.rng)
         total, sleeves = targets_for_live(state, self.models, self.season, 1)
-        return state, order_target(total, sleeves), fair_from_state(state, self.models)
+        return state, scale_target(order_target(total, sleeves)), fair_from_state(state, self.models)
 
     def _touch_fair(self) -> np.ndarray:
         """Mid of the live touch. It is the cross gate for a backup rest, not the order price."""
@@ -1692,7 +1700,8 @@ class Runner:
         new_id = clock.get("competition_id")
         if clock.get("fictional_time"):
             self.fictional_time = str(clock["fictional_time"])
-        if self.competition_id and new_id and str(new_id) != str(self.competition_id):
+        if new_id and str(new_id) != str(self.competition_id or ""):
+            # A different id, or the first id after a start inside the between-season gap.
             self.competition_id = new_id
             self._new_season(clock)
         if new_id:
@@ -2309,6 +2318,9 @@ def resolve_host(url: str, key: str) -> str:
                 if resp.status == 200:
                     return host
         except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # "No competition configured": the exchange is up, the testnet is between seasons.
+                return host
             last = f"{host} {exc.code}"
         except OSError as exc:
             last = f"{host} {exc.__class__.__name__}"
@@ -2330,7 +2342,13 @@ def main() -> None:
     host = resolve_host(url, key)
     case = load_case()
     fitted = json.loads((ROOT / "model" / "fitted.json").read_text())
-    clock = Exchange(host, key).get("/api/v1/competitions/time")
+    try:
+        clock = Exchange(host, key).get("/api/v1/competitions/time")
+    except ExchangeError as exc:
+        if exc.code != 404:
+            raise
+        clock = {"state": None, "fictional_time": None, "competition_id": None}
+        print("no competition configured yet; waiting for the next season", flush=True)
     print(json.dumps({
         "host": host,
         "state": clock.get("state"),
@@ -2349,8 +2367,8 @@ def main() -> None:
         "switch_loss": BOOK_SWITCH_LOSS,
         "stop_loss": SEASON_STOP_LOSS,
     }), flush=True)
-    matched = match_season(str(clock.get("fictional_time")))
-    now = _time(str(clock["fictional_time"]))
+    matched = match_season(str(clock.get("fictional_time"))) if clock.get("fictional_time") else None
+    now = _time(str(clock["fictional_time"])) if clock.get("fictional_time") else np.datetime64("now", "s")
     if matched is None:
         number = 0
         season = blank_season(packet_open_vector(), now)
