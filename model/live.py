@@ -90,9 +90,11 @@ from model.value import ValueFit
 USER_AGENT = "hurricane-research/1.0"
 # Packet: the house takes about 45 real seconds to finish an announcement.
 ANNOUNCEMENT_STAND_DOWN_SECONDS = 45.0
-# The team cap is 180 order actions a minute and it is shared with the browser (40 a minute) and
-# any other bot on the key. 55 rejections overnight while the bot kept under 170, so leave room.
-TEAM_ACTION_BUDGET = 120
+# Our packet copy says 300 order actions a minute per bot key and 180 per team; PR 4 reports a
+# version that says 60 per key. 55 of our orders were rejected overnight while the bot kept under
+# 170, so until the organizers confirm, stay under the lower figure. A decision that replaces a
+# rest on every name costs about 24 actions, so this still allows two full decisions a minute.
+TEAM_ACTION_BUDGET = 55
 # Each cancel that removes an order re-reads the account and ends the pass, so a decision needs
 # about one pass per name that has a rest to replace. Four passes left 9 of 12 names unsent after
 # an event (simulated: only PORT, ISLE and AQUA got their new order). A pass is two GETs and no
