@@ -1,15 +1,21 @@
-"""Live book. Location sleeve from the first order, then the backup if it is losing.
+"""Live book. Sends the research book (config.LIVE_BOOK) to the exchange.
 
-The research backtest is unchanged. Live orders are the location residual on
-the physical names. Severity, the insurer kink, composition, revision, known
-damage, and ETF orders stay off for the whole season. That is not a refit.
+The research backtest is unchanged. Which book goes out, whether positions
+carry across rounds, and the loss bounds are flags in config.py, each with
+the holdout replay that chose its default (model/reports/live_rules.md).
 
-If the exchange season mark (realized plus unrealized) reaches -400 while the
-location book is on, cancel, flatten, and only the backup trades for the rest
-of the season. At -800, flatten and send no more risk. Any name, on either
-book, is flattened when its own exchange mark is through -150, and it is not
-reopened. Those three numbers are pre-set bounds. A round-end or cap exit
-uses the last two-sided quote when the live quote is empty, and it crosses.
+Season state survives a restart and a reconnect: every news frame is appended
+to state/<competition_id>.jsonl and replayed on start, and the exchange's
+30-second snapshot fills any gap (damage reports from earlier rounds, the
+latest advisory, the track). The value anchor is the season open: the matched
+research season on the testnet, the first quotes at a round-1 open, or the
+case packet's starting prices. An announcement re-anchors the named symbols by
+the part of the house's 45-second move that the storm model does not explain,
+so the book does not fade a repricing it cannot see.
+
+If the season mark reaches -BOOK_SWITCH_LOSS, flatten and only the backup
+trades. At -SEASON_STOP_LOSS, flatten and stop. A round-end or cap exit uses
+the last two-sided quote when the live quote is empty, and it crosses.
 
 Both books size an order as target minus the exchange position minus the
 working leaves. A cancel that comes back already filled (409) is a fill, and
@@ -49,15 +55,25 @@ from model.backup import BACKUP, MAIN, STOPPED, backup_names, backup_quantity, n
 from model.house import event_key
 from model.config import (
     ARCH_BASKET,
+    BOOK_SWITCH_LOSS,
     CLASSES,
     DEADBAND_FRACTION,
     LIVE_ANNOUNCEMENT_STAND_DOWN,
+    LIVE_BOOK,
     LIVE_ETF_ORDERS,
+    LIVE_FLATTEN_AT_ROUND_END,
+    LIVE_ONE_ENTRY_PER_ROUND,
+    LIVE_PER_NAME_DEADBAND,
     LIVE_SPREAD_CROSSING,
+    MIN_REST_SECONDS,
+    NAME_LOSS_CAP,
     NAMES,
+    PACKET_OPEN,
     PHYSICAL,
     PRE_TURN_FRACTION,
     REBLD_BASKET,
+    REST_IMPROVE,
+    SEASON_STOP_LOSS,
     SEED,
 )
 from model.damage import DamageFit
@@ -78,7 +94,13 @@ ENV_PATH = Path("/tmp/ctc-bot.env")
 FALLBACK_HOST = "https://cornelltradingcompetition.org"
 ROOT = Path(__file__).resolve().parent.parent
 HISTORY = ROOT / "hurricane-season-research" / "history"
+STATE_DIR = ROOT / "state"
 BASKETS = {"ARCH": ARCH_BASKET, "REBLD": REBLD_BASKET}
+STOCKS = tuple(name for name in NAMES if name not in BASKETS)
+IDX = {name: index for index, name in enumerate(NAMES)}
+# The fictional clock runs 30 times real time. Storm age is in real seconds.
+FICTIONAL_PER_REAL = 30
+NEWS_TYPES = ("storm", "storm_formed", "advisory", "damage_report", "impact", "storm_dissipated", "announcement")
 
 
 def api_credentials() -> tuple[str, str]:
@@ -113,12 +135,25 @@ def redact(text: str, secret: str) -> str:
     return text
 
 
+def rest_tick(bid: float, ask: float) -> float:
+    """How far inside the touch a rest sits: REST_IMPROVE, but never more than a quarter spread."""
+    spread = float(ask) - float(bid)
+    tick = min(float(REST_IMPROVE), 0.25 * spread)
+    return round(tick, 6) if tick >= 1e-6 else 0.0
+
+
+def rest_price(side: str, bid: float, ask: float) -> float:
+    """Where an opening order rests: one tick inside the house touch, first in the queue."""
+    tick = rest_tick(bid, ask)
+    return round(float(bid) + tick, 6) if side == "buy" else round(float(ask) - tick, 6)
+
+
 def limit_price(side: str, bid: float, ask: float, fair: float, reducing: bool = False) -> float | None:
-    """Rest on our side. Cross only when the edge through the spread beats the spread.
+    """Rest inside the touch. Cross only when the edge through the spread beats the spread.
 
     A reduction does not use that gate. A sell that shrinks a long hits the bid.
-    A buy that shrinks a short lifts the ask. Opening or adding still rests
-    unless the gap beats the spread. LIVE_SPREAD_CROSSING stays false.
+    A buy that shrinks a short lifts the ask. Opening or adding rests one tick
+    inside the touch unless the gap beats the spread. LIVE_SPREAD_CROSSING stays false.
     """
     if bid is None or ask is None or not np.isfinite(bid) or not np.isfinite(ask) or ask < bid:
         return None
@@ -126,11 +161,11 @@ def limit_price(side: str, bid: float, ask: float, fair: float, reducing: bool =
     if side == "buy":
         if reducing or (not LIVE_SPREAD_CROSSING and float(fair - ask) > spread):
             return float(ask)
-        return float(bid)
+        return rest_price("buy", bid, ask)
     if side == "sell":
         if reducing or (not LIVE_SPREAD_CROSSING and float(bid - fair) > spread):
             return float(bid)
-        return float(ask)
+        return rest_price("sell", bid, ask)
     return None
 
 
@@ -160,21 +195,47 @@ def stale_order_ids(orders: list[dict], meta: dict[str, dict], now: float, half_
         half = half_lives.get(info.get("event_key"))
         if half is None:
             continue
-        if float(now) - float(info["placed_at"]) > float(half):
+        if float(now) - float(info["placed_at"]) > max(float(half), float(MIN_REST_SECONDS)):
             found.append(oid)
     return found
 
 
-def targets_for_live(state: dict, models: Models, season, bar: int):
-    """Location sleeve only, from the first order.
+def still_at_touch(order: dict, quote: dict | None) -> bool:
+    """A rest that still sits where a fresh rest would go is not stale, whatever its age."""
+    if not two_sided(quote):
+        return False
+    side = str(order.get("side") or "")
+    if side not in ("buy", "sell"):
+        return False
+    want = rest_price(side, float(quote["bid"]), float(quote["ask"]))
+    return abs(float(order.get("price") or 0.0) - want) <= 0.0051
 
-    Severity, the insurer kink, composition, revision, known damage, and the
-    ETF sleeve stay off for the whole season. Research calls targets_from_state
-    without this flag and is unchanged. This is not a refit.
+
+def targets_for_live(state: dict, models: Models, season, bar: int):
+    """The research book, or the variant named by config.LIVE_BOOK.
+
+    Research calls targets_from_state without `live_book` and is unchanged.
     """
     live_state = dict(state)
-    live_state["location_only"] = True
+    live_state["live_book"] = LIVE_BOOK
     return targets_from_state(live_state, models, season, bar)
+
+
+def hold_inside_band(target: np.ndarray, current: np.ndarray, limits: np.ndarray, dead: set[str],
+                     band: float | None = LIVE_PER_NAME_DEADBAND) -> np.ndarray:
+    """Per-name deadband: a name whose change is inside `band` of its limit keeps its position.
+
+    A dead name (target inside the deadband of flat) is left alone so the flatten still goes out.
+    """
+    if band is None:
+        return target
+    out = target.copy()
+    for index, name in enumerate(NAMES):
+        if name in dead:
+            continue
+        if abs(float(target[index]) - float(current[index])) <= float(band) * float(limits[index]) + 1e-9:
+            out[index] = current[index]
+    return out
 
 
 def target_is_dead(target_qty: float, limit: float) -> bool:
@@ -303,6 +364,9 @@ def screen_round_orders(
     opened_side: dict[str, int],
     saw_inventory: dict[str, bool],
 ) -> list[dict]:
+    """Apply the one-entry rule when LIVE_ONE_ENTRY_PER_ROUND is on. Off, every plan goes out."""
+    if not LIVE_ONE_ENTRY_PER_ROUND:
+        return list(plans)
     kept = []
     for order in plans:
         if order.get("flatten") or "side" not in order:
@@ -436,6 +500,11 @@ def _time(value: str) -> np.datetime64:
     return np.datetime64(value, "s")
 
 
+def packet_open_vector() -> np.ndarray:
+    """Case packet section 3, the house price at the first open of the live season."""
+    return np.array([float(PACKET_OPEN[name]) for name in NAMES], dtype=float)
+
+
 def blank_season(opened: np.ndarray, now: np.datetime64) -> Season:
     """A season that has only what the socket has delivered. Used when the research pack is absent."""
     storms = [
@@ -506,9 +575,130 @@ def public_view(number: int, entry: dict, now: np.datetime64) -> tuple[object, n
     return season, opened
 
 
+def _insert_obs(storm, row: np.ndarray, when: np.datetime64) -> bool:
+    """Insert one observation in age order. A row whose age is already there is dropped."""
+    ages = storm.obs[:, 0] if len(storm.obs) else np.zeros(0)
+    at = int(np.searchsorted(ages, row[0], side="left"))
+    if at < len(ages) and abs(float(ages[at]) - float(row[0])) < 1e-9:
+        return False
+    storm.obs = np.insert(storm.obs, at, row.reshape(1, 7), axis=0) if len(storm.obs) else row.reshape(1, 7)
+    storm.times = np.insert(storm.times, at, np.datetime64(when, "s"))
+    return True
+
+
+def apply_track(season, message: dict) -> int:
+    """Fill observation gaps from a track message. Returns the number of rows added.
+
+    Track points are [age, x, y, radius] every 4 s of age and carry no intensity or velocity.
+    Velocity is the finite difference along the track. Intensity is interpolated from the
+    observations we do have, or the formation value of 1.0 before any exist. After a
+    reconnect the exchange sends only the latest storm frame, so the track is the only record
+    of the wind the storm delivered in the gap; the exposure integral uses per-row age gaps,
+    so a 4-second row counts for 4 seconds.
+    """
+    points = message.get("points") or []
+    if message.get("round") is None or len(points) < 2:
+        return 0
+    rnd = int(message["round"])
+    storm = next((item for item in season.storms if item.round == rnd), None)
+    if storm is None:
+        return 0
+    pts = np.asarray([[float(v) for v in point[:4]] for point in points], dtype=float)
+    msg_age = float(message.get("age", pts[-1, 0]))
+    msg_time = _time(str(message["time"]))
+    known_ages = storm.obs[:, 0] if len(storm.obs) else np.zeros(0)
+    added = 0
+    for index, (age, x, y, radius) in enumerate(pts):
+        if len(known_ages) and np.any(np.abs(known_ages - age) < 1e-9):
+            continue
+        prev = pts[index - 1] if index > 0 else None
+        nxt = pts[index + 1] if index + 1 < len(pts) else None
+        a, b = (prev, pts[index]) if nxt is None else ((pts[index], nxt) if prev is None else (prev, nxt))
+        span = float(b[0] - a[0])
+        vx = float((b[1] - a[1]) / span) if span > 0 else 0.0
+        vy = float((b[2] - a[2]) / span) if span > 0 else 0.0
+        if len(storm.obs):
+            intensity = float(np.interp(age, storm.obs[:, 0], storm.obs[:, 6]))
+        else:
+            intensity = 1.0
+        when = msg_time - np.timedelta64(int(round((msg_age - age) * FICTIONAL_PER_REAL)), "s")
+        row = np.array([age, x, y, vx, vy, radius, intensity], dtype=float)
+        if _insert_obs(storm, row, when):
+            added += 1
+            known_ages = storm.obs[:, 0]
+    if msg_time > season.times[1]:
+        season.times[1] = msg_time
+    season.rounds[1] = rnd
+    return added
+
+
+def apply_snapshot(season, snap: dict) -> dict:
+    """Catch up from the 30-second snapshot: damage reports of every round, the latest
+    advisory, the impacts, the latest observation and the track. Returns what it added.
+
+    A bot that connects late, or reconnects after a gap, gets no replay of old messages.
+    Without this the book would value round 2 as if round 1 had done no damage.
+    """
+    rnd = snap.get("round")
+    if rnd is None:
+        advisory = snap.get("advisory") or {}
+        reports = snap.get("damage") or []
+        rnd = advisory.get("round") or (reports[-1].get("round") if reports else None)
+    storm_name = snap.get("storm")
+    stamp = str(snap.get("time"))
+    added = {"damage": 0, "advisory": 0, "impact": 0, "obs": 0, "track": 0}
+    before = len(season.events)
+    for report in snap.get("damage") or []:
+        if not isinstance(report, dict) or report.get("round") is None or not report.get("stage"):
+            continue
+        apply_news(season, {**report, "type": "damage_report", "time": report.get("time") or stamp})
+    added["damage"] = len(season.events) - before
+    before = len(season.events)
+    advisory = snap.get("advisory")
+    if isinstance(advisory, dict) and advisory.get("outlook"):
+        apply_news(season, {**advisory, "type": "advisory", "source": advisory.get("source") or "official",
+                            "time": advisory.get("time") or stamp,
+                            "round": int(advisory.get("round") or rnd or 1), "storm": advisory.get("storm") or storm_name})
+    added["advisory"] = len(season.events) - before
+    before = len(season.events)
+    if rnd is not None:
+        for impact in snap.get("impacts") or []:
+            if not isinstance(impact, dict) or not impact.get("island"):
+                continue
+            apply_news(season, {
+                "type": "impact", "round": int(rnd), "storm": storm_name, "time": impact.get("time") or stamp,
+                "island": impact["island"], "age": impact.get("age"),
+                "headline": f"Hurricane conditions reported on {impact['island']}.",
+            })
+        added["impact"] = len(season.events) - before
+        obs = snap.get("obs")
+        if isinstance(obs, dict) and all(key in obs for key in ("age", "x", "y", "vx", "vy", "radius", "intensity")):
+            storm = next((item for item in season.storms if item.round == int(rnd)), None)
+            n_before = len(storm.obs) if storm is not None else 0
+            apply_news(season, {**obs, "type": "storm", "round": int(rnd), "storm": storm_name, "time": obs.get("time") or stamp})
+            added["obs"] = (len(storm.obs) if storm is not None else 0) - n_before
+        track = snap.get("track")
+        if track:
+            age = float(obs["age"]) if isinstance(obs, dict) and "age" in obs else float(track[-1][0])
+            added["track"] = apply_track(season, {"type": "track", "round": int(rnd), "storm": storm_name,
+                                                   "time": (obs.get("time") if isinstance(obs, dict) else None) or stamp,
+                                                   "age": age, "points": track})
+        season.rounds[1] = int(rnd)
+    when = _time(stamp) if snap.get("time") else None
+    if when is not None and when > season.times[1]:
+        season.times[1] = when
+    return added
+
+
 def apply_news(season, message: dict) -> None:
     kind = message.get("type")
-    if kind not in ("storm", "storm_formed", "advisory", "damage_report", "impact", "storm_dissipated", "announcement"):
+    if kind == "track":
+        apply_track(season, message)
+        return
+    if kind == "snapshot":
+        apply_snapshot(season, message)
+        return
+    if kind not in NEWS_TYPES:
         return
     when = _time(str(message["time"]))
     rnd = int(message["round"])
@@ -522,9 +712,7 @@ def apply_news(season, message: dict) -> None:
             float(message["vx"]), float(message["vy"]), float(message["radius"]),
             float(message["intensity"]),
         ], dtype=float)
-        if len(storm.obs) == 0 or float(storm.obs[-1, 0]) < row[0]:
-            storm.obs = np.vstack([storm.obs, row]) if len(storm.obs) else row.reshape(1, 7)
-            storm.times = np.concatenate([storm.times, np.array([when], dtype="datetime64[s]")])
+        _insert_obs(storm, row, when)
         return
     event = {
         "type": kind,
@@ -984,8 +1172,63 @@ def decide_orders(
     return planned
 
 
+class StateStore:
+    """Append-only season state, one JSON line per record, keyed by competition id.
+
+    Records are the raw news frames the socket delivered, the locked open, and anchor shifts.
+    On start the file is replayed, so a restart in round 2 knows round 1's final damage, the
+    season-to-date insured loss, the open it is anchored on, and any announcement repricing.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+
+    def append(self, record: dict) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+
+    def load(self) -> list[dict]:
+        if self.path is None or not self.path.is_file():
+            return []
+        out = []
+        for line in self.path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
+
+
+def anchor_shift_for(mark_before: dict[str, float], mark_after: dict[str, float],
+                     fair_before: np.ndarray, fair_after: np.ndarray, symbols: list[str]) -> dict[str, float]:
+    """The part of the house's move on `symbols` that the storm model did not produce.
+
+    After an announcement the house reprices for about 45 real seconds. Our value model knows
+    nothing about announcements, so without this it would fade that repricing for the rest of
+    the season. The shift is added to the season-open anchor of each named stock: the house's
+    move minus our own fair-value change over the same window, so storm news inside the window
+    is not mistaken for the announcement. ETFs are valued from their baskets and take no shift.
+    """
+    out: dict[str, float] = {}
+    for name in symbols:
+        if name not in IDX or name in BASKETS:
+            continue
+        if name not in mark_before or name not in mark_after:
+            continue
+        house = float(mark_after[name]) - float(mark_before[name])
+        model = float(fair_after[IDX[name]]) - float(fair_before[IDX[name]])
+        out[name] = house - model
+    return out
+
+
 class Runner:
-    def __init__(self, exchange: Exchange, models: Models, season, opened: np.ndarray, record_path: Path, max_seconds: float, open_from_feed: bool = False, book_log: Path | None = None) -> None:
+    def __init__(self, exchange: Exchange, models: Models, season, opened: np.ndarray, record_path: Path, max_seconds: float, open_from_feed: bool = False, book_log: Path | None = None, state_store: StateStore | None = None) -> None:
         self.exchange = exchange
         self.models = models
         self.season = season
@@ -1033,6 +1276,75 @@ class Runner:
         self._clock_error = False
         self._book_error = False
         self._halt_state: str | None = None
+        self.state_store = state_store or StateStore(None)
+        self.replaying = False
+        self.anchor_shift = np.zeros(len(NAMES), dtype=float)
+        self.pending_anchor: list[dict] = []
+        self.fictional_time: str | None = None
+
+    def _mids(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for name in NAMES:
+            quote = self.quotes.get(name) or {}
+            if two_sided(quote):
+                out[name] = 0.5 * (float(quote["bid"]) + float(quote["ask"]))
+        return out
+
+    def _fair_now(self) -> np.ndarray | None:
+        try:
+            state = _state_at(self.season, 1, self.models, np.random.default_rng(SEED))
+            return fair_from_state(state, self.models)
+        except Exception as exc:
+            self.note("error", where="fair", message=redact(str(exc), self.exchange.key))
+            return None
+
+    def _apply_anchor(self) -> None:
+        self.season.prices[0] = self.opened + self.anchor_shift
+
+    def replay(self, records: list[dict]) -> None:
+        """Rebuild season state from the store. Nothing is re-appended while replaying."""
+        self.replaying = True
+        try:
+            for record in records:
+                kind = record.get("kind")
+                if kind == "open":
+                    self.opened = np.asarray(record["opened"], dtype=float)
+                    self.open_locked = True
+                    self.open_from_feed = False
+                    self._apply_anchor()
+                    continue
+                if kind == "anchor":
+                    self.anchor_shift = np.asarray(record["shift"], dtype=float)
+                    self._apply_anchor()
+                    continue
+                if record.get("type"):
+                    self.on_news(record)
+        finally:
+            self.replaying = False
+        self.pending_anchor = []
+        self.note("replayed", records=len(records), round=int(self.season.rounds[1]),
+                  events=len(self.season.events), obs=[int(len(storm.obs)) for storm in self.season.storms])
+
+    def _settle_anchors(self) -> None:
+        """Once the 45-second stand-down has passed, move the anchor by the unexplained house move."""
+        if not self.pending_anchor:
+            return
+        now = time.time()
+        due = [item for item in self.pending_anchor if now - float(item["at"]) >= ANNOUNCEMENT_STAND_DOWN_SECONDS]
+        if not due:
+            return
+        self.pending_anchor = [item for item in self.pending_anchor if item not in due]
+        fair_after = self._fair_now()
+        mids = self._mids()
+        if fair_after is None:
+            return
+        for item in due:
+            shift = anchor_shift_for(item["mark_before"], mids, np.asarray(item["fair_before"]), fair_after, item["symbols"])
+            for name, value in shift.items():
+                self.anchor_shift[IDX[name]] += value
+            self._apply_anchor()
+            self.note("anchor", symbols=sorted(shift), shift={k: round(v, 3) for k, v in shift.items()}, headline=item.get("headline"))
+        self.state_store.append({"kind": "anchor", "shift": self.anchor_shift.tolist(), "at": now})
 
     def note(self, kind: str, **fields) -> None:
         row = {"kind": kind, "at": time.time(), **fields}
@@ -1045,30 +1357,56 @@ class Runner:
             handle.write(json.dumps({**frame, "received_at": time.time()}) + "\n")
 
     def on_news(self, message: dict) -> bool:
+        kind = message.get("type")
         seq = message.get("seq")
         if seq is not None:
             if int(seq) in self.seen_seq:
                 return False
             self.seen_seq.add(int(seq))
-        if message.get("type"):
+        if kind:
             key = event_key(message)
             if key:
                 self.justifying_event = key
-        if message.get("type") == "announcement":
+        if kind == "snapshot":
+            added = apply_snapshot(self.season, message)
+            if not self.replaying:
+                self.state_store.append(message)
+            if any(added.values()):
+                self.note("snapshot", added=added, phase=message.get("phase"), round=int(self.season.rounds[1]))
+            self.tracked_round = int(self.season.rounds[1])
+            return any(added.values())
+        if kind == "track":
+            added = apply_track(self.season, message)
+            if not self.replaying:
+                self.state_store.append(message)
+            if added:
+                self.note("track_fill", rows=added, round=int(self.season.rounds[1]))
+            return False
+        if kind == "announcement":
             record_announcement(message, self.announcements)
             if self.announcements:
                 self.announcements[-1]["received_at"] = time.time()
             self.announce_cancel = True
             self.note("announcement", symbols=message.get("symbols") or [], headline=message.get("headline"))
-        if message.get("type") in ("storm", "storm_formed", "advisory", "damage_report", "impact", "storm_dissipated", "announcement") and message.get("time"):
+            if not self.replaying:
+                symbols = [str(symbol) for symbol in (message.get("symbols") or []) if str(symbol) in IDX] or list(STOCKS)
+                fair_before = self._fair_now()
+                if fair_before is not None:
+                    self.pending_anchor.append({
+                        "symbols": symbols, "at": time.time(), "mark_before": self._mids(),
+                        "fair_before": fair_before.tolist(), "headline": message.get("headline"),
+                    })
+        if kind in NEWS_TYPES and message.get("time"):
             apply_news(self.season, message)
+            if not self.replaying:
+                self.state_store.append(message)
             rnd = int(self.season.rounds[1])
             if self.tracked_round is not None and rnd != self.tracked_round:
                 self.backup_open = set()
                 self.round_side = {}
                 self.saw_inventory = {}
             self.tracked_round = rnd
-        return message.get("type") in ("advisory", "impact", "damage_report", "announcement", "storm_formed", "storm_dissipated")
+        return kind in ("advisory", "impact", "damage_report", "announcement", "storm_formed", "storm_dissipated")
 
     def refresh_account(self) -> None:
         payload = self.exchange.get("/api/v1/positions?include_zero=true")
@@ -1079,8 +1417,22 @@ class Runner:
     def _books_ready(self) -> bool:
         return any(item.get("bid") is not None for item in self.quotes.values())
 
+    def _at_season_open(self) -> bool:
+        """Round 1, before the first storm has formed: the quotes on screen are the season open."""
+        if int(self.season.rounds[1]) != 1:
+            return False
+        if any(len(storm.obs) for storm in self.season.storms):
+            return False
+        return not any(event["type"] in ("storm_formed", "advisory", "damage_report") for event in self.season.events)
+
     def _sync_mark(self) -> bool:
-        """Write the latest mids. False means the open is not locked yet."""
+        """Write the latest mids. False means the open is not locked yet.
+
+        The value model is anchored on the season open. With no research match the anchor
+        starts at the case packet's starting prices; it is replaced by the first full set of
+        quotes only when those quotes are a round-1 open. In round 2 or 3 the packet table
+        stays, because the quotes on screen already carry round-1 damage.
+        """
         mids = self.opened.copy()
         quoted = 0
         for index, name in enumerate(NAMES):
@@ -1091,16 +1443,33 @@ class Runner:
         if self.open_from_feed and not self.open_locked:
             if quoted < len(NAMES):
                 return False
-            self.opened = mids.copy()
-            self.season.prices[0] = self.opened
+            if self._at_season_open():
+                self.opened = mids.copy()
+                source = "first quotes"
+            else:
+                source = "case packet (not at a round-1 open)"
+            self._apply_anchor()
             self.open_locked = True
-            self.note("open", source="first quotes")
+            self.open_from_feed = False
+            self.state_store.append({"kind": "open", "opened": self.opened.tolist(), "source": source, "at": time.time()})
+            self.note("open", source=source)
         self.season.prices[1] = mids
         return True
 
     def _expired_ids(self, now: float) -> list[str]:
         orders = [{"id": oid} for oid in self.order_meta]
-        return stale_order_ids(orders, self.order_meta, now, published_half_lives())
+        expired = stale_order_ids(orders, self.order_meta, now, published_half_lives())
+        if not expired:
+            return []
+        by_id = {str(order.get("id") or order.get("order_id") or ""): order for order in self.open_orders}
+        out = []
+        for oid in expired:
+            order = by_id.get(oid)
+            if order is not None and still_at_touch(order, self.quotes.get(str(order.get("symbol")))):
+                self.order_meta[oid]["placed_at"] = now
+                continue
+            out.append(oid)
+        return out
 
     def _cancel_id(self, oid: str, why: str) -> str:
         if not oid:
@@ -1155,6 +1524,75 @@ class Runner:
         self.last_target = None
         self.note("season_reset")
 
+    def _new_season(self, clock: dict) -> None:
+        """A new competition id is a new season: new feed state, new anchor, new store.
+
+        The testnet starts the next research season under a new id while the socket stays up.
+        Keeping the old season's damage reports and observations would value every name
+        against the wrong storms.
+        """
+        self._reset_season()
+        fictional = str(clock.get("fictional_time") or self.fictional_time or "")
+        now = _time(fictional) if fictional else self.season.times[1]
+        matched = match_season(fictional) if fictional else None
+        if matched is None:
+            number = 0
+            self.season = blank_season(packet_open_vector(), now)
+            self.opened = self.season.prices[0].copy()
+            self.open_from_feed = True
+            self.open_locked = False
+        else:
+            number, entry = matched
+            self.season, self.opened = public_view(number, entry, now)
+            self.open_from_feed = False
+            self.open_locked = True
+        try:
+            self.models.library = load_library(number or None)
+        except Exception as exc:
+            self.note("error", where="library", message=redact(str(exc), self.exchange.key))
+        self.rng = np.random.default_rng(SEED + int(number))
+        self.anchor_shift = np.zeros(len(NAMES), dtype=float)
+        self.pending_anchor = []
+        self.seen_seq = set()
+        self.announcements = []
+        self.order_meta = {}
+        self.flatten_order_ids = set()
+        self.round_side = {}
+        self.saw_inventory = {}
+        self.tracked_round = None
+        self.carry_done = False
+        self.flattened_on_exit = False
+        self.etf_done = False
+        new_id = clock.get("competition_id")
+        self.state_store = StateStore(STATE_DIR / f"{new_id}.jsonl") if new_id else StateStore(None)
+        self.replay(self.state_store.load())
+        self.note("new_season", competition_id=new_id, research_season=number, open_source="research" if matched else "packet")
+
+    def close_round(self) -> None:
+        """The round left `running`. Flatten if the flag says so; otherwise cancel rests and carry.
+
+        Research carries positions across rounds, and the 600 research seasons show no
+        systematic house move between a close and the next open (std under a dime per stock),
+        so the carried book has the same expectation it had at the bell without paying two
+        spreads. Resting orders are cancelled so nothing stale works into the next open.
+        """
+        if LIVE_FLATTEN_AT_ROUND_END:
+            self.flatten_dead_targets()
+            return
+        if self.flattened_on_exit:
+            return
+        self.flattened_on_exit = True
+        try:
+            self.refresh_account()
+        except Exception as exc:
+            self.errors.append(str(exc))
+            self.note("error", where="round_close", message=str(exc))
+            return
+        ids = self._order_ids()
+        if ids:
+            self._cancel_listed(ids, "round_end")
+        self.note("round_close", carried={name: qty for name, qty in self.position.items() if abs(float(qty)) >= 1})
+
     def _begin_round(self) -> None:
         self.flattened_on_exit = False
         self.carry_done = False
@@ -1165,8 +1603,11 @@ class Runner:
 
     def _apply_clock(self, clock: dict) -> None:
         new_id = clock.get("competition_id")
+        if clock.get("fictional_time"):
+            self.fictional_time = str(clock["fictional_time"])
         if self.competition_id and new_id and str(new_id) != str(self.competition_id):
-            self._reset_season()
+            self.competition_id = new_id
+            self._new_season(clock)
         if new_id:
             self.competition_id = new_id
         state = clock.get("state")
@@ -1186,7 +1627,7 @@ class Runner:
         retry = self.round_open or not self.flattened_on_exit
         self.round_open = False
         if retry:
-            self.flatten_dead_targets()
+            self.close_round()
         if not session_continues(state):
             self._halt_state = state
 
@@ -1311,6 +1752,7 @@ class Runner:
             plan = marketable_flatten(name, self.position.get(name, 0.0), resting[name], self._exit_quotes().get(name))
             if plan:
                 plans.append(plan)
+        target = hold_inside_band(target, current, self.models.limits, dead)
         adjusted = target.copy()
         for index, name in enumerate(NAMES):
             if name in dead:
@@ -1428,9 +1870,10 @@ class Runner:
         elif reason == "stale":
             return
         self._mark_inventory()
+        self._settle_anchors()
         if not self.carry_done:
             self.carry_done = True
-            if any(self.saw_inventory.values()):
+            if LIVE_FLATTEN_AT_ROUND_END and any(self.saw_inventory.values()):
                 carried = flatten_all_orders(self.position, self.open_orders, self._exit_quotes())
                 self.note("flatten", why="carry", orders=len(carried))
                 self._submit_plans(carried)
@@ -1788,10 +2231,11 @@ def main() -> None:
         raise SystemExit("live flags must stay on: stand down, rest at the touch, and no ETF orders")
     if PRE_TURN_FRACTION > 0.35 + 1e-12:
         raise SystemExit("revision and known damage must stay at PRE_TURN_FRACTION 0.35")
-    parser = argparse.ArgumentParser(description="Trade the location book, then the backup, on the testnet.")
+    parser = argparse.ArgumentParser(description="Trade the research book (config.LIVE_BOOK) on the exchange; the backup only after a season stop.")
     parser.add_argument("--max-seconds", type=float, default=4 * 60 * 60)
     parser.add_argument("--record", default="recording.jsonl")
     parser.add_argument("--book-log", default="book-log.jsonl")
+    parser.add_argument("--state-dir", default=str(STATE_DIR), help="season state files, one per competition id, replayed on start")
     args = parser.parse_args()
     key, url = api_credentials()
     host = resolve_host(url, key)
@@ -1809,31 +2253,40 @@ def main() -> None:
         "etf_orders": LIVE_ETF_ORDERS,
         "book": "location",
         "book_log": args.book_log,
-        "name_loss_cap": 150,
-        "switch_loss": 400,
-        "stop_loss": 800,
+        "book": LIVE_BOOK,
+        "flatten_at_round_end": LIVE_FLATTEN_AT_ROUND_END,
+        "one_entry_per_round": LIVE_ONE_ENTRY_PER_ROUND,
+        "name_loss_cap": NAME_LOSS_CAP,
+        "switch_loss": BOOK_SWITCH_LOSS,
+        "stop_loss": SEASON_STOP_LOSS,
     }), flush=True)
     matched = match_season(str(clock.get("fictional_time")))
     now = _time(str(clock["fictional_time"]))
     if matched is None:
         number = 0
-        season = blank_season(np.zeros(len(NAMES)), now)
+        season = blank_season(packet_open_vector(), now)
         opened = season.prices[0].copy()
         open_from_feed = True
-        print("no local research season; the open will be the first quotes", flush=True)
+        print("no local research season; anchor is the case packet open, replaced by the first quotes at a round-1 open", flush=True)
     else:
         number, entry = matched
         season, opened = public_view(number, entry, now)
         open_from_feed = False
         print(f"replay season {number} public feed through {clock.get('fictional_time')}", flush=True)
     models = load_models(fitted, case, skip_season=number or None)
+    competition_id = clock.get("competition_id")
+    store = StateStore(Path(args.state_dir) / f"{competition_id}.jsonl") if competition_id else StateStore(None)
     runner = Runner(
         Exchange(host, key), models, season, opened, Path(args.record), args.max_seconds, open_from_feed,
-        book_log=Path(args.book_log),
+        book_log=Path(args.book_log), state_store=store,
     )
-    runner.competition_id = clock.get("competition_id")
+    runner.competition_id = competition_id
     runner.clock_state = clock.get("state")
+    runner.fictional_time = str(clock.get("fictional_time") or "")
     runner.round_open = clock.get("state") == "running"
+    records = store.load()
+    if records:
+        runner.replay(records)
     try:
         asyncio.run(runner.run())
     finally:

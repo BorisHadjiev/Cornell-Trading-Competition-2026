@@ -10,7 +10,8 @@ from unittest.mock import patch
 import numpy as np
 
 from model import live
-from model.config import NAME_LOSS_CAP, NAMES
+from model import backup
+from model.config import NAMES
 
 
 class CredentialTests(unittest.TestCase):
@@ -30,10 +31,15 @@ class CredentialTests(unittest.TestCase):
 
 class OrderRuleTests(unittest.TestCase):
     def test_rests_inside_the_spread_and_crosses_only_when_the_gap_wins(self) -> None:
-        self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.3), 10.0)
+        # A rest sits one tick inside the house touch, so it is first in the queue for house flow.
+        self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.3), 10.01)
         self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.5), 10.2)
-        self.assertEqual(live.limit_price("sell", 10.0, 10.2, 9.9), 10.2)
+        self.assertEqual(live.limit_price("sell", 10.0, 10.2, 9.9), 10.19)
         self.assertEqual(live.limit_price("sell", 10.0, 10.2, 9.5), 10.0)
+        # A tight book is not crossed by the improvement: the tick is capped at a quarter spread.
+        self.assertEqual(live.rest_tick(10.0, 10.02), 0.005)
+        self.assertEqual(live.limit_price("buy", 10.0, 10.02, 10.0), 10.005)
+        self.assertEqual(live.rest_tick(10.0, 10.0), 0.0)
 
     def test_etf_mark_sleeve_is_not_an_order(self) -> None:
         total = np.arange(len(NAMES), dtype=float)
@@ -82,9 +88,9 @@ class OrderRuleTests(unittest.TestCase):
 
     def test_a_reducing_order_is_marketable_and_an_add_still_respects_the_gate(self) -> None:
         # The gap does not beat the spread, so an add rests and a reduction crosses.
-        self.assertEqual(live.limit_price("sell", 10.0, 10.2, 10.1), 10.2)
+        self.assertEqual(live.limit_price("sell", 10.0, 10.2, 10.1), 10.19)
         self.assertEqual(live.limit_price("sell", 10.0, 10.2, 10.1, reducing=True), 10.0)
-        self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.1), 10.0)
+        self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.1), 10.01)
         self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.1, reducing=True), 10.2)
 
         mat = NAMES.index("MAT")
@@ -110,7 +116,7 @@ class OrderRuleTests(unittest.TestCase):
         buy = [order for order in live.decide_orders(opened, fair, position, [], quotes, limits, set()) if order["symbol"] == "MAT"]
         self.assertEqual(buy[0]["side"], "buy")
         self.assertFalse(buy[0]["reducing"])
-        self.assertEqual(buy[0]["price"], 10.0)
+        self.assertEqual(buy[0]["price"], 10.01)
 
         fair_cross = fair.copy()
         fair_cross[mat] = 10.5
@@ -133,7 +139,7 @@ class OrderRuleTests(unittest.TestCase):
         legs = [order for order in live.decide_orders(flip, fair, position, [], quotes, limits, set()) if order["symbol"] == "MAT"]
         self.assertEqual(
             [(order["quantity"], order["price"], order["reducing"]) for order in legs],
-            [(100, 10.0, True), (30, 10.2, False)],
+            [(100, 10.0, True), (30, 10.19, False)],
         )
 
     def test_working_leaves_shrink_the_next_order(self) -> None:
@@ -159,7 +165,7 @@ class OrderRuleTests(unittest.TestCase):
         resting = [{"symbol": "PORT", "side": "sell", "quantity": 40, "price": 10.0, "id": "old"}]
         planned = live.decide_orders(target, fair, {"PORT": 0.0}, resting, quotes, limits, set())
         self.assertEqual(planned[0]["quantity"], 50)
-        self.assertEqual(planned[0]["price"], 10.2)
+        self.assertEqual(planned[0]["price"], 10.19)
         self.assertEqual(planned[0]["cancel"], ["old"])
 
     def test_a_409_is_a_fill(self) -> None:
@@ -188,14 +194,13 @@ class OrderRuleTests(unittest.TestCase):
         self.assertIsNone(row["ISLE"]["house_mark"])
         self.assertIsNone(row["ISLE"]["bid"])
 
-    def test_live_severity_sleeve_is_zero_and_research_is_not(self) -> None:
+    def test_live_book_full_is_the_research_book_and_location_is_the_residual(self) -> None:
         from model.backtest import targets_from_state
         from model.config import CLASSES
 
         n = len(NAMES)
         aqua = NAMES.index("AQUA")
         mat = NAMES.index("MAT")
-        gen = NAMES.index("GEN")
         haven = NAMES.index("HAVEN")
         limits = np.full(n, 1000.0)
         mark = np.full(n, 10.0)
@@ -247,54 +252,41 @@ class OrderRuleTests(unittest.TestCase):
             "known": ("known", 0.0, 0.0),
             "prelim": False,
             "final": True,
+            "location": True,
             "probs": probs,
             "near": True,
             "post_turn": True,
             "round": 1,
         }
-        from model.portfolio import disagree_scale as real_disagree
-
-        seen = []
-
-        def spy(shares_in, physics, statistical, mark_in):
-            seen.append(float(shares_in[mat]))
-            return real_disagree(shares_in, physics, statistical, mark_in)
-
         with (
             patch("model.backtest._value_shares", shares),
             patch("model.backtest._scenario_value", lambda *_args: mark.copy()),
-            patch("model.portfolio.disagree_scale", spy),
         ):
-            _total, research = targets_from_state(state, models, Season(), 0)
-            pre = dict(state)
-            pre["fraction"] = 0.35
-            pre["post_turn"] = False
-            _pre_total, early = live.targets_for_live(pre, models, Season(), 0)
-            _post_total, late = live.targets_for_live(dict(state), models, Season(), 0)
+            research_total, research = targets_from_state(dict(state), models, Season(), 0)
+            with patch.object(live, "LIVE_BOOK", "full"):
+                full_total, full = live.targets_for_live(dict(state), models, Season(), 0)
+            with patch.object(live, "LIVE_BOOK", "location"):
+                loc_total, loc = live.targets_for_live(dict(state), models, Season(), 0)
+            with patch.object(live, "LIVE_BOOK", "no_severity"):
+                informed_total, _ = live.targets_for_live(dict(state), models, Season(), 0)
+                uninformed = dict(state)
+                uninformed.update(location=False, prelim=False, final=False)
+                flat_total, _ = live.targets_for_live(uninformed, models, Season(), 0)
 
-        self.assertNotIn("zero_severity", state)
-        self.assertNotIn("zero_severity", pre)
-        self.assertNotIn("location_only", state)
-        self.assertNotIn("location_only", pre)
-        self.assertEqual(seen, [240.0, 0.0, 0.0])
+        self.assertNotIn("live_book", state)
+        # The default live book sends exactly what the holdout scored.
+        self.assertTrue(np.allclose(full_total, research_total))
         self.assertAlmostEqual(research["severity"][aqua], 100.0)
         self.assertAlmostEqual(research["location"][aqua], 30.0)
         self.assertAlmostEqual(research["known_damage"][aqua], 35.0)
-        self.assertAlmostEqual(research["composition"][mat], 240.0)
-        self.assertAlmostEqual(research["composition"][gen], 30.0)
-        self.assertAlmostEqual(research["insurer_kink"][haven], 92.5)
-        self.assertAlmostEqual(_pre_total[aqua], 30.0)
-        self.assertEqual(_pre_total[mat], 0.0)
-        self.assertEqual(_pre_total[haven], 0.0)
-        for sleeves in (early, late):
-            self.assertEqual(sleeves["severity"][aqua], 0.0)
-            self.assertAlmostEqual(sleeves["location"][aqua], 30.0)
-            self.assertEqual(sleeves["known_damage"][aqua], 0.0)
-            self.assertEqual(sleeves["revision"][aqua], 0.0)
-            self.assertEqual(sleeves["composition"][mat], 0.0)
-            self.assertEqual(sleeves["composition"][gen], 0.0)
-            self.assertEqual(sleeves["insurer_kink"][haven], 0.0)
-            self.assertEqual(float(sleeves["etf_gap"][aqua]), 0.0)
+        # "location" keeps only the residual on the physical names: 130 - 100 on AQUA, nothing on MAT or HAVEN.
+        self.assertAlmostEqual(loc_total[aqua], 30.0)
+        self.assertEqual(loc_total[mat], 0.0)
+        self.assertEqual(loc_total[haven], 0.0)
+        self.assertAlmostEqual(loc["location"][aqua], 30.0)
+        # "no_severity" is the full book once a view exists, and flat before one does.
+        self.assertTrue(np.allclose(informed_total, research_total))
+        self.assertTrue(np.allclose(flat_total, 0.0))
 
     def test_a_resting_order_is_cancelled_after_its_house_half_life(self) -> None:
         half = live.published_half_lives()
@@ -304,9 +296,13 @@ class OrderRuleTests(unittest.TestCase):
         self.assertEqual(half["preliminary"], 4.0)
         self.assertEqual(half["final"], 4.0)
         orders = [{"id": "exit", "symbol": "MAT"}]
+        floor = live.MIN_REST_SECONDS
+        self.assertEqual(floor, 20.0)
+        # Damage-report half-lives (4 s) are floored: a 4-second cancel-and-replace loop on ten
+        # names would burn the team's 180 actions a minute.
         final = {"exit": {"placed_at": 100.0, "event_key": "final"}}
-        self.assertEqual(live.stale_order_ids(orders, final, 104.0, half), [])
-        self.assertEqual(live.stale_order_ids(orders, final, 104.01, half), ["exit"])
+        self.assertEqual(live.stale_order_ids(orders, final, 100.0 + floor, half), [])
+        self.assertEqual(live.stale_order_ids(orders, final, 100.01 + floor, half), ["exit"])
         official = {"exit": {"placed_at": 100.0, "event_key": "official_advisory"}}
         self.assertEqual(live.stale_order_ids(orders, official, 120.0, half), [])
         self.assertEqual(live.stale_order_ids(orders, official, 120.01, half), ["exit"])
@@ -317,12 +313,17 @@ class OrderRuleTests(unittest.TestCase):
         self.assertEqual(live.stale_order_ids(orders, impact, 126.0, half), [])
         self.assertEqual(live.stale_order_ids(orders, impact, 126.01, half), ["exit"])
         preliminary = {"exit": {"placed_at": 100.0, "event_key": "preliminary"}}
-        self.assertEqual(live.stale_order_ids(orders, preliminary, 104.0, half), [])
-        self.assertEqual(live.stale_order_ids(orders, preliminary, 104.01, half), ["exit"])
+        self.assertEqual(live.stale_order_ids(orders, preliminary, 100.0 + floor, half), [])
+        self.assertEqual(live.stale_order_ids(orders, preliminary, 100.01 + floor, half), ["exit"])
         untouched = {"exit": {"placed_at": 100.0, "event_key": None}}
         self.assertEqual(live.stale_order_ids(orders, untouched, 1000.0, half), [])
 
     def test_a_name_does_not_add_or_reverse_after_it_opens(self) -> None:
+        plans = [{"symbol": "PORT", "side": "buy", "quantity": 10}]
+        with patch.object(live, "LIVE_ONE_ENTRY_PER_ROUND", False):
+            self.assertEqual(live.screen_round_orders(plans, {"PORT": 50.0}, {"PORT": 1}, {"PORT": True}), plans)
+        with patch.object(live, "LIVE_ONE_ENTRY_PER_ROUND", True):
+            self.assertEqual(live.screen_round_orders(plans, {"PORT": 50.0}, {"PORT": 1}, {"PORT": True}), [])
         self.assertTrue(live.allows_round_order(0, False, 0, "buy", 10))
         self.assertTrue(live.allows_round_order(1, False, 0, "buy", 10))
         self.assertFalse(live.allows_round_order(1, False, 0, "sell", 10))
@@ -350,9 +351,12 @@ class OrderRuleTests(unittest.TestCase):
         self.assertEqual(live.exit_quotes({"AQUA": {"bid": None, "ask": None}}, {}), {})
 
     def test_the_name_cap_does_not_wait_for_the_backup_book(self) -> None:
-        self.assertEqual(NAME_LOSS_CAP, 150.0)
-        self.assertEqual(live.names_past_cap({"PORT": -150.0, "ISLE": -149.0}, set()), ["PORT"])
-        self.assertEqual(live.names_past_cap({"PORT": -267.67}, {"PORT"}), [])
+        with patch.object(backup, "NAME_LOSS_CAP", 150.0):
+            self.assertEqual(live.names_past_cap({"PORT": -150.0, "ISLE": -149.0}, set()), ["PORT"])
+            self.assertEqual(live.names_past_cap({"PORT": -267.67}, {"PORT"}), [])
+        # The shipped default has no per-name cap: a 150-dollar bound fires on advisory noise.
+        with patch.object(backup, "NAME_LOSS_CAP", None):
+            self.assertEqual(live.names_past_cap({"PORT": -5000.0}, set()), [])
 
     def test_a_round_end_flattens_a_name_the_target_still_wants(self) -> None:
         position = {name: 0.0 for name in NAMES}
@@ -365,6 +369,156 @@ class OrderRuleTests(unittest.TestCase):
         self.assertEqual(haven[0]["quantity"], 140)
         self.assertEqual(haven[0]["price"], 33.82)
         self.assertTrue(haven[0]["reducing"])
+
+
+class StateAndCatchUpTests(unittest.TestCase):
+    def _season(self):
+        now = np.datetime64("2026-11-02T09:30:00", "s")
+        return live.blank_season(live.packet_open_vector(), now)
+
+    def test_snapshot_fills_earlier_rounds_damage_and_the_latest_advisory(self) -> None:
+        season = self._season()
+        snap = {
+            "type": "snapshot", "round": 2, "storm": "Beryl", "time": "2026-11-03T10:30:00", "phase": "storm",
+            "last_seq": 400,
+            "obs": {"age": 60, "x": 480.0, "y": 640.0, "vx": 0.0, "vy": -1.8, "radius": 81.0, "intensity": 1.05},
+            "track": [[52, 480.0, 654.4, 80.8], [56, 480.0, 647.2, 80.9], [60, 480.0, 640.0, 81.0]],
+            "advisory": {"round": 2, "storm": "Beryl", "time": "2026-11-03T10:15:00", "source": "official", "number": 1,
+                         "age": 30, "outlook": "direct", "hurricane_conditions": {"cascadia_prime": 0.7}, "cone": []},
+            "impacts": [],
+            "damage": [
+                {"type": "damage_report", "round": 1, "storm": "Arlo", "time": "2026-11-02T14:15:00", "stage": "preliminary",
+                 "damage_pct": {"PORT": 30.0}, "industry_loss_musd": 500.0},
+                {"type": "damage_report", "round": 1, "storm": "Arlo", "time": "2026-11-02T15:40:00", "stage": "final",
+                 "damage_pct": {"PORT": 28.0}, "industry_loss_musd": 480.0},
+            ],
+            "headlines": [],
+        }
+        added = live.apply_snapshot(season, snap)
+        self.assertEqual(added["damage"], 2)
+        self.assertEqual(added["advisory"], 1)
+        self.assertEqual(added["obs"], 1)
+        self.assertEqual(added["track"], 2)
+        self.assertEqual(int(season.rounds[1]), 2)
+        finals = [e for e in season.events if e["type"] == "damage_report" and e["stage"] == "final"]
+        self.assertEqual(finals[0]["damage_pct"]["PORT"], 28.0)
+        storm = season.storms[1]
+        self.assertEqual([int(a) for a in storm.obs[:, 0]], [52, 56, 60])
+        # Track rows carry the interpolated intensity and a finite-difference velocity.
+        self.assertAlmostEqual(float(storm.obs[0, 6]), 1.05)
+        self.assertAlmostEqual(float(storm.obs[0, 4]), -1.8, places=6)
+        # Replaying the same snapshot adds nothing.
+        again = live.apply_snapshot(season, snap)
+        self.assertEqual(sum(again.values()), 0)
+
+    def test_track_fills_a_gap_and_the_exposure_counts_the_gap_seconds(self) -> None:
+        from model.damage import row_steps
+        season = self._season()
+        for age in (0, 2, 4):
+            live.apply_news(season, {"type": "storm", "round": 1, "storm": "Arlo", "time": f"2026-11-02T10:0{age // 2}:00",
+                                     "age": age, "x": 480.0, "y": 740.0 - age, "vx": 0.0, "vy": -1.0, "radius": 80.0, "intensity": 1.0})
+        live.apply_news(season, {"type": "storm", "round": 1, "storm": "Arlo", "time": "2026-11-02T10:10:00",
+                                 "age": 20, "x": 480.0, "y": 720.0, "vx": 0.0, "vy": -1.0, "radius": 80.0, "intensity": 1.2})
+        storm = season.storms[0]
+        self.assertEqual([int(a) for a in storm.obs[:, 0]], [0, 2, 4, 20])
+        self.assertEqual(row_steps(storm.obs, 2.0).tolist(), [2.0, 2.0, 2.0, 16.0])
+        added = live.apply_track(season, {"type": "track", "round": 1, "storm": "Arlo", "time": "2026-11-02T10:10:00", "age": 20,
+                                          "points": [[0, 480.0, 740.0, 80.0], [4, 480.0, 736.0, 80.0], [8, 480.0, 732.0, 80.0],
+                                                     [12, 480.0, 728.0, 80.0], [16, 480.0, 724.0, 80.0], [20, 480.0, 720.0, 80.0]]})
+        self.assertEqual(added, 3)
+        self.assertEqual([int(a) for a in storm.obs[:, 0]], [0, 2, 4, 8, 12, 16, 20])
+        self.assertEqual(row_steps(storm.obs, 2.0).tolist(), [2.0, 2.0, 2.0, 4.0, 4.0, 4.0, 4.0])
+        self.assertAlmostEqual(float(storm.obs[4, 6]), 1.1)  # intensity interpolated between 1.0 at age 4 and 1.2 at age 20
+
+    def test_announcement_anchor_is_the_house_move_the_model_did_not_make(self) -> None:
+        fair_before = np.zeros(len(NAMES))
+        fair_after = np.zeros(len(NAMES))
+        gen = NAMES.index("GEN")
+        port = NAMES.index("PORT")
+        fair_after[gen] = 0.5   # the storm model moved GEN by 0.5 in the window on its own
+        fair_after[port] = -1.0
+        before = {"GEN": 40.0, "PORT": 72.0, "ARCH": 289.0}
+        after = {"GEN": 46.5, "PORT": 71.0, "ARCH": 295.0}
+        shift = live.anchor_shift_for(before, after, fair_before, fair_after, ["GEN", "PORT", "ARCH", "ISLE"])
+        self.assertAlmostEqual(shift["GEN"], 6.0)      # 6.5 house move, 0.5 explained by the storm
+        self.assertAlmostEqual(shift["PORT"], 0.0)     # the house move was entirely the storm
+        self.assertNotIn("ARCH", shift)                # ETFs are valued from the basket
+        self.assertNotIn("ISLE", shift)                # not quoted on both sides of the window
+
+    def test_state_store_replays_open_anchor_and_news(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            store = live.StateStore(Path(folder) / "c1.jsonl")
+            store.append({"kind": "open", "opened": live.packet_open_vector().tolist()})
+            store.append({"type": "damage_report", "round": 1, "storm": "Arlo", "time": "2026-11-02T15:40:00", "stage": "final",
+                          "damage_pct": {"PORT": 28.0}, "industry_loss_musd": 480.0, "seq": 290})
+            store.append({"kind": "anchor", "shift": [0.0] * (len(NAMES) - 1) + [0.0]})
+            records = store.load()
+            self.assertEqual(len(records), 3)
+            season = self._season()
+            runner = live.Runner.__new__(live.Runner)
+            runner.season = season
+            runner.opened = np.zeros(len(NAMES))
+            runner.anchor_shift = np.zeros(len(NAMES))
+            runner.open_locked = False
+            runner.open_from_feed = True
+            runner.seen_seq = set()
+            runner.justifying_event = None
+            runner.announcements = []
+            runner.pending_anchor = []
+            runner.tracked_round = None
+            runner.backup_open = set()
+            runner.round_side = {}
+            runner.saw_inventory = {}
+            runner.state_store = live.StateStore(None)
+            runner.exchange = type("X", (), {"key": ""})()
+            runner.log = []
+            runner.replay(records)
+            self.assertTrue(runner.open_locked)
+            self.assertAlmostEqual(float(runner.opened[NAMES.index("PORT")]), 72.48)
+            self.assertAlmostEqual(float(season.prices[0][NAMES.index("PORT")]), 72.48)
+            finals = [e for e in season.events if e["type"] == "damage_report"]
+            self.assertEqual(len(finals), 1)
+            self.assertIn(290, runner.seen_seq)
+
+    def test_a_rest_still_at_the_touch_is_not_stale_and_the_floor_is_twenty_seconds(self) -> None:
+        quote = {"bid": 10.0, "ask": 10.2}
+        self.assertTrue(live.still_at_touch({"side": "buy", "price": 10.01}, quote))
+        self.assertFalse(live.still_at_touch({"side": "buy", "price": 9.95}, quote))
+        self.assertFalse(live.still_at_touch({"side": "sell", "price": 10.01}, quote))
+        self.assertFalse(live.still_at_touch({"side": "buy", "price": 10.01}, {"bid": None, "ask": 10.2}))
+        half = live.published_half_lives()
+        orders = [{"id": "x", "symbol": "MAT"}]
+        meta = {"x": {"placed_at": 100.0, "event_key": "final"}}
+        # The fitted half-life after a final report is 4 s; the rest still lives MIN_REST_SECONDS.
+        self.assertEqual(live.stale_order_ids(orders, meta, 104.1, half), [])
+        self.assertEqual(live.stale_order_ids(orders, meta, 100.0 + live.MIN_REST_SECONDS + 0.01, half), ["x"])
+
+    def test_per_name_deadband_holds_small_changes_and_lets_a_dead_name_flatten(self) -> None:
+        limits = np.full(len(NAMES), 100.0)
+        current = np.zeros(len(NAMES))
+        target = np.zeros(len(NAMES))
+        port, isle, aqua = NAMES.index("PORT"), NAMES.index("ISLE"), NAMES.index("AQUA")
+        current[port], target[port] = 50.0, 60.0      # inside a 0.15 band: hold
+        current[isle], target[isle] = 50.0, 80.0      # outside: trade
+        current[aqua], target[aqua] = 5.0, 0.0        # dead name: still flattens
+        held = live.hold_inside_band(target, current, limits, {"AQUA"}, band=0.15)
+        self.assertEqual(float(held[port]), 50.0)
+        self.assertEqual(float(held[isle]), 80.0)
+        self.assertEqual(float(held[aqua]), 0.0)
+        self.assertTrue(np.array_equal(live.hold_inside_band(target, current, limits, set(), band=None), target))
+
+    def test_the_season_open_is_taken_from_quotes_only_at_a_round_one_open(self) -> None:
+        season = self._season()
+        runner = live.Runner.__new__(live.Runner)
+        runner.season = season
+        self.assertTrue(runner._at_season_open())
+        live.apply_news(season, {"type": "storm_formed", "round": 1, "storm": "Arlo", "time": "2026-11-02T10:00:00", "headline": "formed"})
+        self.assertFalse(runner._at_season_open())
+        season2 = self._season()
+        runner.season = season2
+        season2.rounds[1] = 2
+        self.assertFalse(runner._at_season_open())
 
 
 if __name__ == "__main__":

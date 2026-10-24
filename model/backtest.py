@@ -65,9 +65,15 @@ def _severity(radius: float, intensity: float, median_ri: float) -> float:
 
 
 def _location_on(probs: np.ndarray) -> bool:
+    from model.config import LOCATION_GATE
     look = [float(probs[CLASSES.index(name)]) for name in LOOKALIKE]
     ordered = sorted(look)
-    return ordered[-1] - ordered[-2] >= LOCATION_GAP
+    if ordered[-1] - ordered[-2] >= LOCATION_GAP:
+        return True
+    if LOCATION_GATE != "all":
+        return False
+    every = sorted(float(p) for p in probs)
+    return every[-1] - every[-2] >= LOCATION_GAP
 
 
 def _path_damage(models: Models, paths: list[np.ndarray], our_intensity: float) -> tuple[np.ndarray, np.ndarray, float]:
@@ -389,17 +395,31 @@ def targets_from_state(
             shares[IDX["REIN"]] = 0.0
     fair = models.value.predict(opened, *state["known"])
     stat = models.value.statistical(opened, *state["known"])
-    # Live sets this after the location residual is split off. Research never
-    # sets it, so the fitted book is unchanged. The zero is in place before
-    # the disagree scale, the scenario caps, rebucket, and the reserve.
-    if state.get("zero_severity"):
+    # Live book selection. Research never sets `live_book`, so the fitted book is unchanged.
+    #
+    # The sleeve names are an attribution, not independent bets. `severity` is the whole
+    # position implied by the unconditional storm mean (scaled by radius and intensity), and
+    # `location` is only the residual s_loc_full - s_sev on top of it. Their sum is the book's
+    # best fair-value position. Dropping `severity` alone therefore does not "turn off a sleeve":
+    # it leaves the residual, which after an advisory has moved the mark is the location view
+    # MINUS a fade of the house, usually larger and in the wrong direction. Holdout replay
+    # (model/reports/live_rules.md): research book mean 6,336; severity zeroed 3,440.
+    #
+    #   "full"         the research book (default for live)
+    #   "no_severity"  the research book, but flat until a view beyond the unconditional
+    #                  storm mean exists (an official advisory that separates the path, a
+    #                  preliminary report, or a final report)
+    #   "location"     the PR 3 experiment: the location residual on the physical names only
+    #   legacy_zero_severity reproduces the old live behaviour for the replay table only
+    mode = state.get("live_book")
+    if state.get("legacy_zero_severity"):
         sleeves["severity"] = np.zeros_like(sleeves["severity"])
-    # Live only. Research never sets this, so the fitted book is unchanged and
-    # this is not a refit. The order is the location residual on the physical
-    # names, then the same disagree scale, scenario caps, and reserve. The
-    # insurer kink, composition, revision, known damage, severity, and ETF
-    # stay at zero for the whole season.
-    if state.get("location_only"):
+    if mode == "no_severity":
+        informed = bool(state.get("location") or state.get("prelim") or state.get("final"))
+        if not informed:
+            for name in sleeves:
+                sleeves[name] = np.zeros(len(NAMES))
+    elif mode == "location":
         residual = (s_loc_full - s_sev).copy()
         for index, name in enumerate(NAMES):
             if name not in PHYSICAL:
@@ -412,7 +432,7 @@ def targets_from_state(
     sleeves = portfolio._scale_to_match(sleeves, fundamental)
     etf = portfolio.etf_mark_sleeve(mark, models.limits, fraction)
     etf = portfolio.fit_inside_limits(fundamental, etf, models.limits)
-    if state.get("location_only"):
+    if mode in ("location", "no_severity") and not (mode == "no_severity" and (state.get("location") or state.get("prelim") or state.get("final"))):
         etf = np.zeros_like(etf)
     sleeves["etf_gap"] = etf
     scenario_values = {

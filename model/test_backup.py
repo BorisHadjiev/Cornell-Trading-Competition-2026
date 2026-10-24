@@ -6,8 +6,10 @@ import unittest
 
 import numpy as np
 
+from unittest.mock import patch
+
 from model import backup
-from model.config import NAMES, BOOK_SWITCH_LOSS, NAME_LOSS_CAP, SEASON_STOP_LOSS
+from model.config import NAMES
 
 
 def _frame(n: int, port: list[float], rounds: list[int], settlement: float) -> dict:
@@ -44,9 +46,9 @@ def _advisory(times: np.ndarray, bar: int, round_id: int) -> dict:
 
 class BackupRuleTests(unittest.TestCase):
     def test_caps_are_the_pre_set_bounds_and_do_not_switch_back(self) -> None:
-        self.assertEqual(NAME_LOSS_CAP, 150.0)
-        self.assertEqual(BOOK_SWITCH_LOSS, 400.0)
-        self.assertEqual(SEASON_STOP_LOSS, 800.0)
+        self._caps = patch.multiple(backup, NAME_LOSS_CAP=150.0, BOOK_SWITCH_LOSS=400.0, SEASON_STOP_LOSS=800.0)
+        self._caps.start()
+        self.addCleanup(self._caps.stop)
         sites = {"PORT": ["cascadia_prime"], "ISLE": ["palm_atoll"]}
         advisory = {
             "type": "advisory",
@@ -65,7 +67,19 @@ class BackupRuleTests(unittest.TestCase):
         self.assertTrue(backup.name_capped(-150.0))
         self.assertFalse(backup.name_capped(-149.0))
 
+    def test_a_bound_set_to_none_is_off(self) -> None:
+        with patch.multiple(backup, NAME_LOSS_CAP=None, BOOK_SWITCH_LOSS=None, SEASON_STOP_LOSS=None):
+            self.assertFalse(backup.name_capped(-1e9))
+            self.assertEqual(backup.next_book(backup.MAIN, -1e9), backup.MAIN)
+        with patch.multiple(backup, NAME_LOSS_CAP=None, BOOK_SWITCH_LOSS=2500.0, SEASON_STOP_LOSS=5000.0):
+            self.assertEqual(backup.next_book(backup.MAIN, -2499.0), backup.MAIN)
+            self.assertEqual(backup.next_book(backup.MAIN, -2500.0), backup.BACKUP)
+            self.assertEqual(backup.next_book(backup.BACKUP, -5000.0), backup.STOPPED)
+
     def test_a_capped_name_is_not_reopened_next_round(self) -> None:
+        caps = patch.multiple(backup, NAME_LOSS_CAP=150.0, BOOK_SWITCH_LOSS=400.0, SEASON_STOP_LOSS=800.0)
+        caps.start()
+        self.addCleanup(caps.stop)
         frame = _frame(
             8,
             [10, 10, 10, 20, 20, 20, 0, 0],

@@ -32,12 +32,28 @@ def site_wind(x, y, radius, intensity, sites: list[Site], form: str) -> np.ndarr
     return intensity[:, None] * fall
 
 
+def row_steps(obs: np.ndarray, dt: float) -> np.ndarray:
+    """Seconds each observation stands for: the age gap to the previous row, `dt` for the first.
+
+    Research observations are every 2 s, so this equals `dt` everywhere and the fit is unchanged.
+    A live feed can drop frames (a reconnect, a track catch-up every 4 s), and a fixed step would
+    then under-count the wind the storm actually delivered.
+    """
+    if len(obs) == 0:
+        return np.zeros(0, dtype=float)
+    steps = np.full(len(obs), float(dt), dtype=float)
+    if len(obs) > 1:
+        gaps = np.diff(obs[:, 0])
+        steps[1:] = np.where(gaps > 1e-9, gaps, float(dt))
+    return steps
+
+
 def integrate_exposure(obs: np.ndarray, sites: list[Site], form: str, dt: float) -> np.ndarray:
     """Weight-summed time integral of wind for each physical company. obs columns x,y,radius,intensity at 1,2,5,6."""
     wind = site_wind(obs[:, 1], obs[:, 2], obs[:, 5], obs[:, 6], sites, form)
     weights = np.array([site.weight for site in sites], dtype=float)
     companies = [site.company for site in sites]
-    integral = wind.sum(axis=0) * dt
+    integral = (wind * row_steps(obs, dt)[:, None]).sum(axis=0)
     out = np.zeros(len(PHYSICAL), dtype=float)
     for index, company in enumerate(companies):
         out[PHYSICAL.index(company)] += weights[index] * integral[index]
@@ -46,7 +62,7 @@ def integrate_exposure(obs: np.ndarray, sites: list[Site], form: str, dt: float)
 
 def site_exposure(obs: np.ndarray, sites: list[Site], form: str, dt: float) -> np.ndarray:
     wind = site_wind(obs[:, 1], obs[:, 2], obs[:, 5], obs[:, 6], sites, form)
-    return wind.sum(axis=0) * dt
+    return (wind * row_steps(obs, dt)[:, None]).sum(axis=0)
 
 
 def outage_hours(obs: np.ndarray, sites: list[Site], form: str, dt: float, tau: float) -> np.ndarray:
@@ -54,7 +70,7 @@ def outage_hours(obs: np.ndarray, sites: list[Site], form: str, dt: float, tau: 
     wind = site_wind(obs[:, 1], obs[:, 2], obs[:, 5], obs[:, 6], sites, form)
     weights = np.array([site.weight for site in sites], dtype=float)
     companies = [site.company for site in sites]
-    hours = (wind > tau).sum(axis=0) * (dt / 3600.0)
+    hours = ((wind > tau) * row_steps(obs, dt)[:, None]).sum(axis=0) / 3600.0
     out = np.zeros(len(PHYSICAL), dtype=float)
     for index, company in enumerate(companies):
         out[PHYSICAL.index(company)] += weights[index] * hours[index]

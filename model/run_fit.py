@@ -38,9 +38,10 @@ from model.paths import PathLibrary
 from model.revision import apply_revision, fit_revision, mae_by_company as revision_mae
 from model.value import fit_value, mae
 
-REPORT = Path("/cursor/stores/bc-eb7b06b9-c4ba-4ef0-9e95-b0e907682dae/docs/model-results.md")
-PACK_NOTES = Path("/cursor/stores/bc-eb7b06b9-c4ba-4ef0-9e95-b0e907682dae/docs/approach.md")
 HERE = Path(__file__).resolve().parent
+# The report lands next to the other fit artifacts. The old absolute path only existed on one
+# cloud machine, and a laptop refit crashed here after fitted.json had already been rewritten.
+REPORT = HERE / "reports" / "model-results.md"
 PHYSICAL = config.PHYSICAL
 
 

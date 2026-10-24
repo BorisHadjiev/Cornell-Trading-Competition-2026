@@ -12,6 +12,12 @@ PRE_TURN_FRACTION = 0.35
 MIN_ETF_GAP = 1.0
 EDGE_DOLLARS_FOR_FULL_SIZE = 3.0
 LOCATION_GAP = 0.15
+# The location sleeve switches on when the filter separates the path. "lookalike" is the original
+# gate: the top two of direct, chain and recurve must differ by LOCATION_GAP. "all" also switches
+# on when the top two of all six classes differ by LOCATION_GAP, so a storm the filter is sure is
+# a stall or an eyewall replacement (29% of storms) gets the path-conditional value instead of the
+# unconditional mean. Holdout replay, next-mark fill: 6,336 -> 7,337, better in 4 of 4 blocks of 25.
+LOCATION_GATE = "all"
 SCENARIO_CAP_DOLLARS = 4000.0
 KINK_PROXIMITY = 0.35
 TURN_DEGREES = 25.0
@@ -33,11 +39,56 @@ LIVE_SPREAD_CROSSING = False
 # Create/redeem stays off. There is no live ETF exception.
 LIVE_ETF_ORDERS = False
 
-# Pre-set loss bounds. Not estimated, not fit on seasons 1–500 or 501–600,
-# and not chosen by looking at a backtest table.
-NAME_LOSS_CAP = 150.0
-BOOK_SWITCH_LOSS = 400.0
-SEASON_STOP_LOSS = 800.0
+# Which book the live process sends. Holdout replay in model/reports/live_rules.md.
+#   "full"         the research book exactly: 6,336 a season with the old gate, 7,337 with LOCATION_GATE "all"
+#   "no_severity"  the research book, but flat until a path, preliminary or final view exists: 5,196
+#   "location"     the PR 3 experiment, the location residual on the island names only: 1,881
+# The old live change "zero the severity sleeve" is not a mode: it left the location residual minus
+# a fade of the house and scored 3,440.
+LIVE_BOOK = "full"
+
+# Round handling. The research backtest carries positions across rounds, and the house mark
+# moves by well under a tenth of a dollar between a round close and the next open (600 seasons,
+# std 0.02-0.08 per stock). Flattening at the bell and re-entering at the open pays two spreads
+# for no protection, and the one-entry rule blocks the post-turn add that the PORT/ARCH reserve
+# exists for. Both stay available as flags for a testnet comparison.
+LIVE_FLATTEN_AT_ROUND_END = False
+LIVE_ONE_ENTRY_PER_ROUND = False
+
+# Loss bounds, in case dollars of exchange mark (realized plus unrealized). None disables one.
+# Holdout replay (model/reports/live_rules.md): the book's edge is paid at settlement, so a
+# mid-season drawdown usually reverts. A 150-dollar per-name cap fires on ordinary advisory
+# noise (PORT moves about 0.9 dollars per advisory) and cuts the mean from 6,336 to 3,349; a
+# 2,500-dollar switch to the backup fired in 11 of 100 seasons and locked in losses the book
+# would have recovered (10th percentile 1,207 to -2,517). The one stop that stays is a circuit
+# breaker for a broken model: the worst holdout season was -3,845.
+NAME_LOSS_CAP = None
+BOOK_SWITCH_LOSS = None
+SEASON_STOP_LOSS = 6000.0
+
+# Live only: a name whose target is within this fraction of its limit of the current position is
+# held instead of re-sent. The research deadband is all-or-nothing on the whole vector, so one
+# name leaving the band re-sends every name. Holdout replay: turnover 2.04M -> 1.67M a season,
+# mean 7,337 -> 7,170 at zero cost and 5,292 -> 5,502 at 10 bps a side. None turns it off.
+LIVE_PER_NAME_DEADBAND = 0.15
+
+# Resting orders. A rest is cancelled when the quote has moved away from it, but never sooner
+# than MIN_REST_SECONDS: the fitted house half-life after a damage report is 4 s, and a 4-second
+# cancel-and-replace loop on ten names would exhaust the team's 180 actions per minute.
+MIN_REST_SECONDS = 20.0
+# Rest one tick inside the house touch so our order is first in the queue for house flow.
+# Capped at a quarter of the spread so a tight book is not crossed by accident.
+REST_IMPROVE = 0.01
+
+# Case packet, section 3: the house price at the first open of the live season. The value model
+# is anchored on the season open. On the testnet the open comes from the matched research season
+# or the first quotes; in the live competition, or after a restart in round 2 or 3 with no saved
+# open, this table is the anchor.
+PACKET_OPEN = {
+    "PORT": 72.48, "ISLE": 50.26, "AQUA": 27.33, "GRID": 36.41, "FERRY": 17.91,
+    "RECON": 52.38, "MAT": 35.81, "GEN": 40.30, "HAVEN": 39.55, "REIN": 89.36,
+    "ARCH": 289.20, "REBLD": 216.68,
+}
 
 # Structural groups from the case text and the architecture, not estimated.
 CLASSES = ("direct", "chain", "recurve", "stall", "eyewall", "erratic")

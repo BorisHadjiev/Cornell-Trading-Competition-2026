@@ -6,5 +6,6 @@ hurricane-season-research/history/
 # Local testnet recordings and caches
 recording.jsonl
 book-log.jsonl
+state/
 __pycache__/
 *.pyc

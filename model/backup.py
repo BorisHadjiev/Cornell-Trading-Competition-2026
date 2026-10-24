@@ -49,24 +49,24 @@ def backup_names(advisory: dict, sites_by_company: dict, opened: set[str], block
 def next_book(mode: str, season_mark: float) -> str:
     """Season mark is exchange realized plus unrealized. Do not switch back.
 
-    −800 flattens and stops, from either book. −400, while the location book
-    is on, hands the rest of the season to the backup. Both numbers are the
-    pre-set bounds in config.py.
+    SEASON_STOP_LOSS flattens and stops, from either book. BOOK_SWITCH_LOSS,
+    while the main book is on, hands the rest of the season to the backup.
+    A bound set to None is off. Both live in config.py.
     """
-    if season_mark <= -SEASON_STOP_LOSS:
+    if SEASON_STOP_LOSS is not None and season_mark <= -SEASON_STOP_LOSS:
         return STOPPED
     if mode == STOPPED:
         return STOPPED
     if mode == BACKUP:
         return BACKUP
-    if season_mark <= -BOOK_SWITCH_LOSS:
+    if BOOK_SWITCH_LOSS is not None and season_mark <= -BOOK_SWITCH_LOSS:
         return BACKUP
     return MAIN
 
 
 def name_capped(pnl: float) -> bool:
-    """A backup name at the pre-set per-name bound is closed for the season."""
-    return float(pnl) <= -NAME_LOSS_CAP
+    """A name at the per-name bound is closed for the season. None means no per-name bound."""
+    return NAME_LOSS_CAP is not None and float(pnl) <= -NAME_LOSS_CAP
 
 
 def fill_delay(name: str, position: float, target: float, mode: str) -> int:
@@ -144,7 +144,7 @@ def replay_backup(
                 if name_capped(pnl):
                     blocked.add(name)
             season_pnl = float(cash.sum() + position @ mark)
-            if season_pnl <= -SEASON_STOP_LOSS:
+            if SEASON_STOP_LOSS is not None and season_pnl <= -SEASON_STOP_LOSS:
                 stopped = True
         if not stopped:
             for event in by_bar[bar]:
