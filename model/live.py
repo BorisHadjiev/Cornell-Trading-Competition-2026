@@ -690,6 +690,15 @@ def apply_snapshot(season, snap: dict) -> dict:
     return added
 
 
+def event_ident(event: dict) -> tuple:
+    """What makes two feed events the same, whether they came from the research replay, the
+    socket, the snapshot or the state store."""
+    return (
+        str(event.get("type")), str(np.datetime64(event["time"], "s")), int(event.get("round") or 0),
+        event.get("source"), event.get("stage"), event.get("island"), event.get("outlook"),
+    )
+
+
 def apply_news(season, message: dict) -> None:
     kind = message.get("type")
     if kind == "track":
@@ -731,10 +740,10 @@ def apply_news(season, message: dict) -> None:
         "symbols": message.get("symbols") or [],
         "headline": message.get("headline"),
     }
-    ident = (kind, str(when), rnd, message.get("source"), message.get("stage"), message.get("island"), message.get("outlook"))
+    ident = event_ident(event)
     seen = getattr(season, "event_ids", None)
     if seen is None:
-        seen = set()
+        seen = {event_ident(item) for item in season.events}
         season.event_ids = seen
     if ident in seen:
         return

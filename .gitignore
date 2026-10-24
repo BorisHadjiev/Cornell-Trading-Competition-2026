@@ -9,3 +9,4 @@ book-log.jsonl
 state/
 __pycache__/
 *.pyc
+venv/
