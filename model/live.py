@@ -2140,25 +2140,39 @@ class Runner:
             handle.flush()
 
     def _second(self) -> None:
+        """One tick of the per-second loop. Nothing here may raise: a network error on one tick
+        used to kill the loop silently (live, 24 Oct 08:11), and with it the clock polling, the
+        name-cap check and the book log for the rest of the run."""
         try:
             self._apply_clock(self.exchange.get("/api/v1/competitions/time"))
-        except RuntimeError as exc:
+            self._clock_error = False
+        except Exception as exc:  # noqa: BLE001 - an HTTP error, a timeout, a DNS blip
             if not self._clock_error:
                 self._clock_error = True
-                self.note("error", where="clock", message=str(exc))
+                self.note("error", where="clock", message=redact(str(exc), self.exchange.key))
         if self._halt_state:
             return
         try:
             self.refresh_account()
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001
             if not self._book_error:
                 self._book_error = True
-                self.note("error", where="book_log", message=str(exc))
+                self.note("error", where="book_log", message=redact(str(exc), self.exchange.key))
         else:
-            self._flatten_capped_names()
-        if self.round_open and self.book == STOPPED and self._has_position():
-            self.act("timer")
-        self.write_book_log()
+            self._book_error = False
+            try:
+                self._flatten_capped_names()
+            except Exception as exc:  # noqa: BLE001
+                self.note("error", where="name_cap", message=redact(str(exc), self.exchange.key))
+        try:
+            if self.round_open and self.book == STOPPED and self._has_position():
+                self.act("timer")
+        except Exception as exc:  # noqa: BLE001
+            self.note("error", where="stopped_flatten", message=redact(str(exc), self.exchange.key))
+        try:
+            self.write_book_log()
+        except Exception as exc:  # noqa: BLE001
+            self.note("error", where="book_log_write", message=redact(str(exc), self.exchange.key))
 
     async def _act(self, reason: str) -> None:
         """One decision at a time, off the read loop so a slow order burst cannot stall the socket."""
@@ -2211,6 +2225,8 @@ class Runner:
         self._tasks: list[asyncio.Task] = []
         stale_task = asyncio.create_task(self._stale_loop())
         book_task = asyncio.create_task(self._book_loop())
+        self._track(stale_task)
+        self._track(book_task)
         try:
             await self._run_socket(ws_url, headers, subscribe)
         finally:
@@ -2218,16 +2234,24 @@ class Runner:
             book_task.cancel()
 
     async def _book_loop(self) -> None:
-        """Once a second, log the book and flatten any name through the name cap."""
-        try:
-            while time.time() - self.started < self.max_seconds and self._halt_state is None:
+        """Once a second, poll the clock, log the book and flatten any name through the name cap.
+
+        The loop itself never dies on an error in a tick; the tick is logged and the next one runs.
+        """
+        while time.time() - self.started < self.max_seconds and self._halt_state is None:
+            try:
                 async with self._act_lock:
                     if self._halt_state is not None:
                         return
                     await asyncio.to_thread(self._second)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.note("error", where="book_loop", message=redact(str(exc), self.exchange.key))
+            try:
                 await asyncio.sleep(1.0)
-        except asyncio.CancelledError:
-            return
+            except asyncio.CancelledError:
+                return
 
     async def _stale_loop(self) -> None:
         """Reprice a rest once it is older than the event that justified it. Do not churn the rest of the book."""

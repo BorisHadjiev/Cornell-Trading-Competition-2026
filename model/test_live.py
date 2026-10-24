@@ -523,6 +523,26 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual([(o["quantity"], o["price"]) for o in plain], [(100, 10.0)])
         self.assertIsNone(live.touch_depth({"bid": 10.0, "ask": 10.2}, "sell"))
 
+    def test_the_per_second_tick_survives_a_network_error(self) -> None:
+        class FlakyExchange:
+            key = "k"
+            def get(self, path):
+                raise OSError("connection reset")
+        runner = live.Runner.__new__(live.Runner)
+        runner.exchange = FlakyExchange()
+        runner._clock_error = False
+        runner._book_error = False
+        runner._halt_state = None
+        runner.round_open = False
+        runner.book = live.MAIN
+        runner.book_log_path = None
+        runner.log = []
+        notes = []
+        runner.note = lambda kind, **f: notes.append((kind, f.get("where")))
+        runner._second()          # must not raise
+        runner._second()          # and must not log the same error twice
+        self.assertEqual(notes, [("error", "clock"), ("error", "book_log")])
+
     def test_live_size_fraction_scales_the_target_only(self) -> None:
         target = np.full(len(NAMES), 100.0)
         self.assertTrue(np.allclose(live.scale_target(target, 0.5), 50.0))
