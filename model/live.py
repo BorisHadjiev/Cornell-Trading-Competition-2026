@@ -93,6 +93,11 @@ ANNOUNCEMENT_STAND_DOWN_SECONDS = 45.0
 # The team cap is 180 order actions a minute and it is shared with the browser (40 a minute) and
 # any other bot on the key. 55 rejections overnight while the bot kept under 170, so leave room.
 TEAM_ACTION_BUDGET = 120
+# Each cancel that removes an order re-reads the account and ends the pass, so a decision needs
+# about one pass per name that has a rest to replace. Four passes left 9 of 12 names unsent after
+# an event (simulated: only PORT, ISLE and AQUA got their new order). A pass is two GETs and no
+# order actions.
+PLAN_PASSES = 2 * len(NAMES) + 2
 # A missed pong must not close the socket during the last two real minutes of a round.
 PING_INTERVAL_SECONDS = 20.0
 PING_TIMEOUT_SECONDS = 120.0
@@ -1788,7 +1793,7 @@ class Runner:
         if not plans:
             return
         self.note("flatten", why="name_cap", orders=len(plans), symbols=sorted({str(order["symbol"]) for order in plans}))
-        for _ in range(4):
+        for _ in range(PLAN_PASSES):
             if self._submit_plans(plans):
                 break
             quotes = self._exit_quotes()
@@ -1924,7 +1929,7 @@ class Runner:
         if mode in ("flatten", "stop"):
             self.last_target = np.zeros(len(NAMES))
             self._sync_mark()
-            for _ in range(4):
+            for _ in range(PLAN_PASSES):
                 plans = flatten_all_orders(self.position, self.open_orders, self._exit_quotes())
                 self.note("flatten", why=self.book, orders=len(plans))
                 if self._submit_plans(plans):
@@ -1997,7 +2002,7 @@ class Runner:
         sent = False
         holding = False
         plans: list[dict] = []
-        for _ in range(4):
+        for _ in range(PLAN_PASSES):
             plans, holding = self._plans(self.last_target, fair, only)
             only = None
             if self._submit_plans(plans):
@@ -2049,7 +2054,7 @@ class Runner:
         else:
             self._flatten_missing = None
         self._sync_mark()
-        for _ in range(4):
+        for _ in range(PLAN_PASSES):
             plans = flatten_all_orders(self.position, self.open_orders, self._exit_quotes())
             self.note("flatten", orders=len(plans), why="round_end")
             if self._submit_plans(plans):

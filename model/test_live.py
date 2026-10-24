@@ -627,5 +627,53 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertFalse(runner._at_season_open())
 
 
+    def test_one_decision_replaces_a_stale_rest_on_every_name(self) -> None:
+        # Each cancel ends a pass and re-reads the account. With every name resting at an old
+        # price, four passes sent only three names; the pass count must cover all of them.
+        class Exchange:
+            key = "k"
+
+            def __init__(self) -> None:
+                self.orders = {
+                    f"o{i}": {"id": f"o{i}", "symbol": name, "side": "sell", "quantity": 20, "price": 9.0}
+                    for i, name in enumerate(NAMES)
+                }
+                self.placed = 0
+
+            def get(self, path: str) -> dict:
+                if path.startswith("/api/v1/positions"):
+                    return {"positions": [{"symbol": name, "quantity": 0} for name in NAMES]}
+                return {"orders": list(self.orders.values())}
+
+            def delete(self, path: str) -> dict:
+                self.orders.pop(path.rsplit("/", 1)[1])
+                return {}
+
+            def post(self, path: str, payload: dict) -> dict:
+                self.placed += 1
+                oid = f"n{self.placed}"
+                self.orders[oid] = {**payload, "id": oid}
+                return {"id": oid}
+
+        runner = object.__new__(live.Runner)
+        runner.exchange = Exchange()
+        runner.budget = live.ActionBudget()
+        runner.order_meta, runner.flatten_order_ids, runner.round_side = {}, set(), {}
+        runner.orders_sent, runner.errors, runner.log = [], [], []
+        runner.justifying_event = "final"
+        runner.note = lambda *args, **kwargs: None
+        limits = np.full(len(NAMES), 500.0)
+        target = np.full(len(NAMES), -100.0)
+        fair = np.full(len(NAMES), 10.0)
+        quotes = {name: {"bid": 10.0, "ask": 10.2} for name in NAMES}
+        runner.refresh_account()
+        for _ in range(live.PLAN_PASSES):
+            plans = live.decide_orders(target, fair, runner.position, runner.open_orders, quotes, limits, set())
+            if runner._submit_plans(plans):
+                break
+        fresh = {order["symbol"] for order in runner.exchange.orders.values() if order["id"].startswith("n")}
+        self.assertEqual(fresh, set(NAMES))
+        self.assertFalse(any(order["id"].startswith("o") for order in runner.exchange.orders.values()))
+
 if __name__ == "__main__":
     unittest.main()
