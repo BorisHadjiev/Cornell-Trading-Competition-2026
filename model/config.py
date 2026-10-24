@@ -6,7 +6,11 @@ Baseline odds and clip are the example bot's published defaults, not a fit.
 SEED = 2026
 HOLDOUT_START = 501  # fit seasons 1..500, report 501..600
 
-ENSEMBLE_SIZE = 16
+# 48 paths instead of 16 damp the decision-to-decision noise in the target (fewer reversals).
+# Holdout with the current gates: next-mark 7,928 -> 8,092, five marks late 3,810 -> 3,926, better
+# in 4 of 4 blocks at both fills (model/reports/live_rules.md section 4). Three times the model
+# time per decision, well inside the live loop's budget.
+ENSEMBLE_SIZE = 48
 DEADBAND_FRACTION = 0.08
 PRE_TURN_FRACTION = 0.35
 MIN_ETF_GAP = 1.0
@@ -70,7 +74,10 @@ LIVE_ONE_ENTRY_PER_ROUND = False
 # breaker for a broken model: the worst holdout season was -3,845.
 NAME_LOSS_CAP = None
 BOOK_SWITCH_LOSS = None
-SEASON_STOP_LOSS = 6000.0
+# With LIVE_SIZE_FRACTION 0.5 a 3,000 stop is the same relative protection the 6,000 stop gave at
+# full size. On the nine live testnet seasons it would have capped 247 and 250 at -3,000 (-4,180
+# and -4,548) and cost about 580 in 245, which dipped to -3,272 and recovered.
+SEASON_STOP_LOSS = 3000.0
 
 # Live only: a name whose target is within this fraction of its limit of the current position is
 # held instead of re-sent. The research deadband is all-or-nothing on the whole vector, so one

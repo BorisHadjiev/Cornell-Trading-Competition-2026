@@ -90,8 +90,9 @@ from model.value import ValueFit
 USER_AGENT = "hurricane-research/1.0"
 # Packet: the house takes about 45 real seconds to finish an announcement.
 ANNOUNCEMENT_STAND_DOWN_SECONDS = 45.0
-# Leave a few actions under the team cap of 180 per minute.
-TEAM_ACTION_BUDGET = 170
+# The team cap is 180 order actions a minute and it is shared with the browser (40 a minute) and
+# any other bot on the key. 55 rejections overnight while the bot kept under 170, so leave room.
+TEAM_ACTION_BUDGET = 120
 # A missed pong must not close the socket during the last two real minutes of a round.
 PING_INTERVAL_SECONDS = 20.0
 PING_TIMEOUT_SECONDS = 120.0
