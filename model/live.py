@@ -2,9 +2,9 @@
 
 The research backtest is unchanged. This runner does not turn the reserve off,
 does not turn the location scale off, and does not raise revision or known
-damage above PRE_TURN_FRACTION. After the turn, severity is capped at that
-same fraction of its uncapped target. A reduction crosses the spread. A
-resting order is cancelled at the house half-life of the event that justified
+damage above PRE_TURN_FRACTION. The severity sleeve is 0, before and after
+the turn. Location and the other sleeves stay. A reduction crosses the spread.
+A resting order is cancelled at the house half-life of the event that justified
 it. The ETF mark sleeve is not sent as a directional order. Create or redeem
 is quantity 1, and only after both books still show a locked gap.
 
@@ -23,7 +23,6 @@ import argparse
 import asyncio
 import json
 import os
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
-from model import backtest, portfolio
+from model import portfolio
 from model.announce import record as record_announcement
 from model.backtest import Models, _state_at, targets_from_state
 from model.house import event_key
@@ -122,7 +121,6 @@ def limit_price(side: str, bid: float, ask: float, fair: float, reducing: bool =
 
 
 _HALF_LIVES: dict[str, float] | None = None
-_TARGET_LOCK = threading.Lock()
 
 
 def published_half_lives() -> dict[str, float]:
@@ -153,39 +151,17 @@ def stale_order_ids(orders: list[dict], meta: dict[str, dict], now: float, half_
     return found
 
 
-def cap_severity_sleeve(sleeves: dict[str, np.ndarray], post_turn: bool, fraction: float) -> None:
-    """Scale pre-rebucket severity to PRE_TURN_FRACTION of the uncapped target.
-
-    Pre-turn already uses that fraction, so this returns without a second cut.
-    Location, revision, known damage, and the composition tilt are not in this sleeve.
-    """
-    if not post_turn:
-        return
-    fraction = float(fraction)
-    if fraction <= PRE_TURN_FRACTION + 1e-12:
-        return
-    sleeves["severity"] *= PRE_TURN_FRACTION / fraction
-
-
 def targets_for_live(state: dict, models: Models, season, bar: int):
-    """Research targets, with the post-turn severity cap applied before rebucket.
+    """Research targets with the severity sleeve set to zero.
 
-    The backtest calls targets_from_state directly and is unchanged.
+    The zero is applied after the location residual is split off and before
+    the disagree scale, scenario caps, rebucket, and the reserve. Location,
+    revision, known damage, composition, and the kink stay. Research calls
+    targets_from_state without this flag and is unchanged.
     """
-    post_turn = bool(state.get("post_turn"))
-    fraction = float(state.get("fraction", PRE_TURN_FRACTION))
-    with _TARGET_LOCK:
-        original = backtest._rebucket
-
-        def wrapped(sleeves: dict[str, np.ndarray]) -> None:
-            cap_severity_sleeve(sleeves, post_turn, fraction)
-            original(sleeves)
-
-        backtest._rebucket = wrapped
-        try:
-            return targets_from_state(state, models, season, bar)
-        finally:
-            backtest._rebucket = original
+    live_state = dict(state)
+    live_state["zero_severity"] = True
+    return targets_from_state(live_state, models, season, bar)
 
 
 def target_is_dead(target_qty: float, limit: float) -> bool:

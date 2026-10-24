@@ -134,57 +134,109 @@ class OrderRuleTests(unittest.TestCase):
             [(100, 10.0, True), (30, 10.2, False)],
         )
 
-    def test_post_turn_severity_is_capped_at_the_pre_turn_fraction(self) -> None:
-        from model.backtest import _rebucket
-        from model.config import SLEEVES
+    def test_live_severity_sleeve_is_zero_and_research_is_not(self) -> None:
+        from model.backtest import targets_from_state
+        from model.config import CLASSES
 
+        n = len(NAMES)
         aqua = NAMES.index("AQUA")
         mat = NAMES.index("MAT")
         gen = NAMES.index("GEN")
+        haven = NAMES.index("HAVEN")
+        limits = np.full(n, 1000.0)
+        mark = np.full(n, 10.0)
+        mark[NAMES.index("ARCH")] = 80.0
+        mark[NAMES.index("REBLD")] = 50.0
+        severity = np.zeros(n)
+        location_full = np.zeros(n)
+        severity[aqua] = 100.0
+        location_full[aqua] = 130.0
+        severity[mat] = 200.0
+        location_full[mat] = 240.0
+        severity[haven] = 80.0
+        location_full[haven] = 105.0
+        known_full = location_full.copy()
+        known_full[aqua] = 230.0
 
-        def book(severity_aqua: float, severity_mat: float, location_mat: float, tilt_gen: float) -> dict:
-            sleeves = {name: np.zeros(len(NAMES)) for name in SLEEVES}
-            sleeves["severity"][aqua] = severity_aqua
-            sleeves["severity"][mat] = severity_mat
-            sleeves["location"][mat] = location_mat
-            sleeves["composition"][gen] = tilt_gen
-            return sleeves
+        def shares(_models, _opened, _mark, damage, _outage, _loss, _fraction):
+            if damage == "sev":
+                return severity.copy()
+            if damage == "loc":
+                return location_full.copy()
+            if damage == "known":
+                return known_full.copy()
+            return np.zeros(n)
 
-        post = book(-400.0, 390.0, -10.0, 50.0)
-        live.cap_severity_sleeve(post, post_turn=True, fraction=1.0)
-        self.assertAlmostEqual(post["severity"][aqua], -140.0)
-        self.assertAlmostEqual(post["severity"][mat], 136.5)
-        self.assertAlmostEqual(post["location"][mat], -10.0)
-        self.assertAlmostEqual(post["composition"][gen], 50.0)
-        _rebucket(post)
-        self.assertAlmostEqual(post["severity"][aqua], -140.0)
-        self.assertEqual(post["severity"][mat], 0.0)
-        self.assertAlmostEqual(post["composition"][mat], 126.5)
-        self.assertAlmostEqual(post["composition"][gen], 50.0)
+        class Value:
+            def predict(self, *_args):
+                return mark.copy()
 
-        pre = book(-40.0, 9.0, -10.0, 50.0)
-        live.cap_severity_sleeve(pre, post_turn=False, fraction=0.35)
-        self.assertAlmostEqual(pre["severity"][aqua], -40.0)
-        self.assertAlmostEqual(pre["severity"][mat], 9.0)
+            def statistical(self, *_args):
+                return mark.copy()
 
-        already = book(-40.0, 9.0, 0.0, 0.0)
-        live.cap_severity_sleeve(already, post_turn=True, fraction=0.35)
-        self.assertAlmostEqual(already["severity"][aqua], -40.0)
+        models = type("Models", (), {"value": Value(), "limits": limits})()
 
-        def fake(state, models, season, bar):
-            sleeves = {name: np.zeros(len(NAMES)) for name in SLEEVES}
-            sleeves["severity"][mat] = 200.0
-            sleeves["location"][mat] = 40.0
-            from model import backtest
-            backtest._rebucket(sleeves)
-            return sum(sleeves.values()), sleeves
+        class Season:
+            times = [0]
+            events = []
 
-        with patch.object(live, "targets_from_state", fake):
-            _total, capped = live.targets_for_live({"post_turn": True, "fraction": 1.0}, None, None, 1)
-            _total, unchanged = live.targets_for_live({"post_turn": False, "fraction": 0.35}, None, None, 1)
-        self.assertAlmostEqual(capped["composition"][mat], 0.35 * 200.0 + 40.0)
-        self.assertEqual(capped["severity"][mat], 0.0)
-        self.assertAlmostEqual(unchanged["composition"][mat], 240.0)
+        probs = np.zeros(len(CLASSES))
+        probs[CLASSES.index("stall")] = 0.1
+        probs[CLASSES.index("eyewall")] = 0.1
+        state = {
+            "fraction": 1.0,
+            "mark": mark,
+            "open": np.zeros(n),
+            "sev": ("sev", 0.0, 0.0),
+            "loc": ("loc", 0.0, 0.0),
+            "rev": ("rev", 0.0, 0.0),
+            "known": ("known", 0.0, 0.0),
+            "prelim": False,
+            "final": True,
+            "probs": probs,
+            "near": True,
+            "post_turn": True,
+            "round": 1,
+        }
+        from model.portfolio import disagree_scale as real_disagree
+
+        seen = []
+
+        def spy(shares_in, physics, statistical, mark_in):
+            seen.append(float(shares_in[mat]))
+            return real_disagree(shares_in, physics, statistical, mark_in)
+
+        with (
+            patch("model.backtest._value_shares", shares),
+            patch("model.backtest._scenario_value", lambda *_args: mark.copy()),
+            patch("model.portfolio.disagree_scale", spy),
+        ):
+            _total, research = targets_from_state(state, models, Season(), 0)
+            pre = dict(state)
+            pre["fraction"] = 0.35
+            pre["post_turn"] = False
+            _pre_total, early = live.targets_for_live(pre, models, Season(), 0)
+            _post_total, late = live.targets_for_live(dict(state), models, Season(), 0)
+
+        self.assertNotIn("zero_severity", state)
+        self.assertNotIn("zero_severity", pre)
+        self.assertEqual(seen, [240.0, 40.0, 40.0])
+        self.assertAlmostEqual(research["severity"][aqua], 100.0)
+        self.assertAlmostEqual(research["location"][aqua], 30.0)
+        self.assertAlmostEqual(research["known_damage"][aqua], 35.0)
+        self.assertAlmostEqual(research["composition"][mat], 240.0)
+        self.assertAlmostEqual(research["composition"][gen], 30.0)
+        self.assertAlmostEqual(research["insurer_kink"][haven], 92.5)
+        for sleeves in (early, late):
+            self.assertEqual(sleeves["severity"][aqua], 0.0)
+            self.assertAlmostEqual(sleeves["location"][aqua], 30.0)
+            self.assertAlmostEqual(sleeves["known_damage"][aqua], 35.0)
+            self.assertEqual(sleeves["severity"][mat], 0.0)
+            self.assertAlmostEqual(sleeves["composition"][mat], 40.0)
+            self.assertEqual(sleeves["severity"][haven], 0.0)
+            self.assertAlmostEqual(sleeves["insurer_kink"][haven], 12.5)
+        self.assertAlmostEqual(early["composition"][gen], 10.5)
+        self.assertAlmostEqual(late["composition"][gen], 30.0)
 
     def test_a_resting_order_is_cancelled_after_its_house_half_life(self) -> None:
         half = live.published_half_lives()

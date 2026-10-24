@@ -389,6 +389,11 @@ def targets_from_state(
             shares[IDX["REIN"]] = 0.0
     fair = models.value.predict(opened, *state["known"])
     stat = models.value.statistical(opened, *state["known"])
+    # Live sets this after the location residual is split off. Research never
+    # sets it, so the fitted book is unchanged. The zero is in place before
+    # the disagree scale, the scenario caps, rebucket, and the reserve.
+    if state.get("zero_severity"):
+        sleeves["severity"] = np.zeros_like(sleeves["severity"])
     fundamental = portfolio.disagree_scale(sum(sleeves.values()), fair, stat, mark)
     # Put the disagree cut back into the sleeves in proportion.
     sleeves = portfolio._scale_to_match(sleeves, fundamental)

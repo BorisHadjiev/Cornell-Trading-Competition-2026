@@ -77,7 +77,7 @@ The bot we run uses the competition book, not the empty-book maximum (next-mark 
 - Reserve half of PORT, ARCH, and REIN until the track turns.
 - Shrink the location add when a composition or insurer pair is already on.
 - Revision and known-damage at 35% of the original sleeve.
-- Severity stays small. After the turn, severity is capped at 0.35 of the uncapped severity target.
+- The severity sleeve is 0. Location and the other sleeves stay.
 - The book does not carry across a round. A name that has opened is only reduced for the rest of that round.
 - No ETF orders until a live book shows a gap after the spread.
 - Announcement stand-down is on.
