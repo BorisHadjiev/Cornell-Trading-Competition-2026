@@ -61,6 +61,7 @@ from model.config import (
     DEADBAND_FRACTION,
     LIVE_ANNOUNCEMENT_STAND_DOWN,
     LIVE_BOOK,
+    LIVE_CROSS_AT_TOUCH_DEPTH,
     LIVE_ETF_ORDERS,
     LIVE_FLATTEN_AT_ROUND_END,
     LIVE_ONE_ENTRY_PER_ROUND,
@@ -1088,6 +1089,17 @@ def book_snapshot(
     return out
 
 
+def touch_depth(quote: dict | None, side: str) -> int | None:
+    """Shares shown on the side a crossing order would hit: the ask for a buy, the bid for a sell."""
+    if not isinstance(quote, dict):
+        return None
+    raw = quote.get("ask_size") if side == "buy" else quote.get("bid_size")
+    size = _number(raw)
+    if size is None or size < 1:
+        return None
+    return int(size)
+
+
 def _split_need(position: float, side: str, quantity: float) -> tuple[float, float]:
     closable = 0.0
     if side == "sell" and position > 0:
@@ -1147,6 +1159,7 @@ def decide_orders(
         reduce_qty, add_qty = _split_need(pos, side, abs(need))
         reduce_px = limit_price(side, float(bid), float(ask), float(fair[index]), reducing=True) if reduce_qty >= 1 else None
         add_px = limit_price(side, float(bid), float(ask), float(fair[index]), reducing=False) if add_qty >= 1 else None
+        rest_px = rest_price(side, float(bid), float(ask))
         kept_reduce = 0.0
         kept_add = 0.0
         cancel = []
@@ -1155,7 +1168,7 @@ def decide_orders(
             leaves = abs(signed_leaves(order))
             same = str(order.get("side") or "") == side and leaves >= 1.0
             price = float(order.get("price") or 0.0)
-            if same and reduce_px is not None and abs(price - reduce_px) <= 0.05 and kept_reduce + leaves <= reduce_qty + 1e-6:
+            if same and reduce_px is not None and (abs(price - reduce_px) <= 0.05 or abs(price - rest_px) <= 0.05) and kept_reduce + leaves <= reduce_qty + 1e-6:
                 kept_reduce += leaves
                 continue
             if same and add_px is not None and abs(price - add_px) <= 0.05 and kept_add + leaves <= add_qty + 1e-6:
@@ -1171,7 +1184,13 @@ def decide_orders(
         send_add = int(round(add_qty - kept_add))
         if send_reduce >= 1 and reduce_px is not None and room >= 1:
             take = min(send_reduce, int(room))
-            if take >= 1:
+            depth = touch_depth(quote, side) if LIVE_CROSS_AT_TOUCH_DEPTH else None
+            if take >= 1 and depth is not None and take > depth and abs(reduce_px - rest_px) > 1e-9:
+                # Cross only what the touch shows; rest the remainder inside our side of the book.
+                legs.append((depth, True, reduce_px))
+                legs.append((take - depth, True, rest_px))
+                room -= take
+            elif take >= 1:
                 legs.append((take, True, reduce_px))
                 room -= take
         if send_add >= 1 and add_px is not None and room >= 1:

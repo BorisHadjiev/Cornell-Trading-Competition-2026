@@ -501,6 +501,28 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual(live.stale_order_ids(orders, meta, 104.1, half), [])
         self.assertEqual(live.stale_order_ids(orders, meta, 100.0 + live.MIN_REST_SECONDS + 0.01, half), ["x"])
 
+    def test_a_crossing_reduction_takes_the_touch_and_rests_the_rest(self) -> None:
+        limits = np.full(len(NAMES), 700.0)
+        fair = np.full(len(NAMES), 10.1)
+        target = np.zeros(len(NAMES))
+        mat = NAMES.index("MAT")
+        position = {name: 0.0 for name in NAMES}
+        position["MAT"] = 100.0           # long 100, target 0: a 100-share sell that would cross
+        quotes = {"MAT": {"bid": 10.0, "ask": 10.2, "bid_size": 30, "ask_size": 50}}
+        with patch.object(live, "LIVE_CROSS_AT_TOUCH_DEPTH", True):
+            legs = [o for o in live.decide_orders(target, fair, position, [], quotes, limits, set()) if o["symbol"] == "MAT"]
+        self.assertEqual([(o["quantity"], o["price"], o["reducing"]) for o in legs], [(30, 10.0, True), (70, 10.19, True)])
+        # A resting remainder already working at that price is kept, not replaced.
+        resting = [{"symbol": "MAT", "side": "sell", "quantity": 70, "price": 10.19, "id": "keep"}]
+        with patch.object(live, "LIVE_CROSS_AT_TOUCH_DEPTH", True):
+            again = [o for o in live.decide_orders(target, fair, position, resting, quotes, limits, set()) if o["symbol"] == "MAT"]
+        self.assertEqual([(o["quantity"], o["price"], o.get("cancel")) for o in again], [(30, 10.0, [])])
+        # Without a shown size, or with the flag off, the whole reduction crosses as before.
+        with patch.object(live, "LIVE_CROSS_AT_TOUCH_DEPTH", False):
+            plain = [o for o in live.decide_orders(target, fair, position, [], quotes, limits, set()) if o["symbol"] == "MAT"]
+        self.assertEqual([(o["quantity"], o["price"]) for o in plain], [(100, 10.0)])
+        self.assertIsNone(live.touch_depth({"bid": 10.0, "ask": 10.2}, "sell"))
+
     def test_per_name_deadband_holds_small_changes_and_lets_a_dead_name_flatten(self) -> None:
         limits = np.full(len(NAMES), 100.0)
         current = np.zeros(len(NAMES))

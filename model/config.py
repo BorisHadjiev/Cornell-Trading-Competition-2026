@@ -78,6 +78,12 @@ SEASON_STOP_LOSS = 6000.0
 # mean 7,337 -> 7,170 at zero cost and 5,292 -> 5,502 at 10 bps a side. None turns it off.
 LIVE_PER_NAME_DEADBAND = 0.15
 
+# Live only: a crossing reduction takes at most the size shown at the touch and rests the
+# remainder one tick inside our side. The house shows 14-60 shares at the touch and 600 about
+# four dollars away, so a 200-share cross walks the book. Live seasons 243-247: the gap between
+# the season mark and position-times-mid was -300 to -1,000 a season, most of it from crosses.
+LIVE_CROSS_AT_TOUCH_DEPTH = True
+
 # Resting orders. A rest is cancelled when the quote has moved away from it, but never sooner
 # than MIN_REST_SECONDS: the fitted house half-life after a damage report is 4 s, and a 4-second
 # cancel-and-replace loop on ten names would exhaust the team's 180 actions per minute.

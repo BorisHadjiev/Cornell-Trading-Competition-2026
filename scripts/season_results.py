@@ -58,7 +58,7 @@ def main() -> None:
     for s in seasons:
         print(f"  closed {time.strftime('%H:%M', time.localtime(s['closed_at']))}  final mark {s['final_mark']:+9.2f}")
     if prev is not None:
-        print(f"current season: mark {prev['mark']:+9.2f} at {time.strftime('%H:%M:%S', time.localtime(prev['t']))}")
+        print(f"current season: mark {(prev['mark'] or 0.0):+9.2f} at {time.strftime('%H:%M:%S', time.localtime(prev['t']))}")
     if seasons:
         marks = [s["final_mark"] for s in seasons]
         print(f"mean {sum(marks)/len(marks):+.2f} over {len(marks)} seasons, losing {sum(1 for m in marks if m < 0)}")
