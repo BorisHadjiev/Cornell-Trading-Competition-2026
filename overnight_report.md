@@ -1,3 +1,36 @@
+# Overnight run, 24 Oct 2026 (01:20 to 07:00) — summary
+
+**Scorecard, 7 completed testnet seasons (exchange season mark at the close):**
+
+| Season | Result | Bot version |
+|---|---:|---|
+| 242 | +4,039 | v1 (research book, old gate) |
+| 243 | +2,562 | v1 |
+| 244 | +4,734 | v1 |
+| 245 | −2,419 | v2 (cent prices) |
+| 246 | −1,696 | v2 |
+| 247 | −4,180 | v3 from round 3 (kink gate 1.0) |
+| 248 | −109 | v4 (kink 1.0 + touch-depth crosses); +3,301 after round 2 |
+| 249 | running | v4 |
+
+Mean +419 per season, 3 of 7 positive, standard deviation about 3,500: positive but not yet
+proven with this sample. The research holdout for the same book is +7,928 at the next mark and
++3,810 with fills five marks late; live fills behave like the late-fill case, and the remaining
+gap is churn (10 to 17 sign flips a season) and large reductions walking a thin book.
+
+**Changes made overnight, each with its evidence in the lines below:** cent-rounded prices
+(a rejected order), event dedup on snapshots, insurer gate kept on across the whole layer
+(KINK_PROXIMITY 1.0, holdout +592 next-mark in 4/4 blocks), crossing reductions capped at the
+shown touch size. Not changed, with the replay that said no: insurer kink off (worse mean),
+ensemble 48 alone (2/4 blocks), location-only, round-end flatten, one-entry rule, loss caps.
+
+**Open items for the morning:** per-name deadband 0.25/0.35 replay (churn), ensemble 48 + kink
+1.0 (passes 4/4 both fills, +755 / +380), the HAVEN valuation at the ends of the layer (fair
+off by 5-7 dollars in 246 and 247), and the shared 180-actions-a-minute budget (429s seen when
+someone else was active on the team key).
+
+---
+
 2026-10-24 01:48 | season 243 (id 5edc122c) round 1 | season mark +1226.77 | per-name: PORT +1282, ISLE +194, FERRY +20, GRID +19, AQUA -22, GEN -31, MAT -44, RECON -191 | completed: season 242 closed +4038.67 (all names positive; no change) | open orders 0 | errors 1 (transient 404 "No competition configured" during the season rollover, bot recovered) | spreads median 23-38 bps
 2026-10-24 02:18 | season 243 (id 5edc122c) round 3 | season mark +3937.95 | per-name: PORT +3025, RECON +901, ISLE +479, GRID +235, AQUA +226, GEN +93, MAT +21, REIN +7, HAVEN -254, FERRY -796 | completed: 242 +4038.67 | no season completed since last check; no change | open orders 0 | errors 1 (same transient 404) | spreads median 24-32 bps
 2026-10-24 02:48 | season 244 (id 2cf67e88) | season mark +5127.13 | per-name: PORT +2934, HAVEN +1294, RECON +498, GRID +277, MAT +150, GEN +130, FERRY +36, ISLE +24, AQUA +21, REIN -238 | completed: 242 +4038.67, 243 +2562.29 (243 was +3938 in round 3 and gave back ~1400 by the close) | both positive: no change | open orders 0 | errors 5 total (see log excerpt in session)
@@ -14,3 +47,6 @@
 2026-10-24 05:48 | season 248 (id 789097b1) about to open, flat | completed: 242 +4038.67, 243 +2562.29, 244 +4733.88, 245 -2419.02, 246 -1696.25, 247 -4180.28 (6 seasons, 3 positive, mean +507) | 247 closed NEGATIVE, worst yet, round 3 ran on v3 (kink 1.0) and went -1059 -> -4180 -> diagnosing | open orders 0 | errors 8 (rollover 404 only)
 2026-10-24 05:50 | DIAGNOSIS + DECISION season 247 (-4180): research truth: Pia direct hit in round 1 then two mild storms; PORT 70.9 -> 85.4 and HAVEN 37.1 -> 59.2 at settlement; the research book itself makes -1680 on this season in-sample (location -2121, kink -735, composition -677), so three quarters of the live loss is the model view in a season the model gets wrong (HAVEN fair about 52 vs settle 59; same shape as 246 where fair 26.6 vs settle 21.3: the linear layer model misprices HAVEN at the ends). Position-times-mid was -3171 of -4180, so about -1000 was fills; the cross-side spread paid on HAVEN was 992 and on PORT in 246 1011. Churn low (4 flips). Under the rule, priority 1 (fills) applies to that part: crossing reductions now take only the size shown at the touch and rest the remainder one tick inside our side (LIVE_CROSS_AT_TOUCH_DEPTH), live-only, research unchanged by construction, unit test added, suite green. Insurer kink has now lost in 3 seasons but the kink-off replay fails the 5-mark gate, so it stays. Scorecard: 6 seasons, 3 positive, mean +507.
 2026-10-24 06:00 | NOTE: the restart for the touch-depth rule happened while the clock was still running (the ready-gap wait timed out after 9 minutes and the stop command was not gated on it). The old process cancelled its rests on exit and the new one restored state from the store within seconds; positions carried. Not the protocol; recorded.
+2026-10-24 06:18 | season 248 (id 789097b1) round 2 just closed, clock ready | season mark +3301.20 | per-name: HAVEN +3276, GEN +287, RECON +276, GRID +160, MAT +91, ISLE +18, REIN +15, FERRY +7, AQUA -19, PORT -811 | completed: 242 +4038.67, 243 +2562.29, 244 +4733.88, 245 -2419.02, 246 -1696.25, 247 -4180.28 (mean +507) | no season completed since last check: no change; first season on the wide kink gate + touch-depth rule, HAVEN sleeve held through the layer and paid | open orders 0 | errors 9 total, none since the v4 restart
+2026-10-24 06:49 | season 249 (id 7d19a254) round 1 | season mark +3759.90 | per-name: HAVEN +2717, RECON +387, GRID +329, PORT +313, MAT +118, AQUA +102, REIN -10, FERRY -12, ISLE -42, GEN -144 | completed: 242 +4038.67, 243 +2562.29, 244 +4733.88, 245 -2419.02, 246 -1696.25, 247 -4180.28, 248 -108.59 (7 seasons, 3 positive, mean +419) | 248 was +3301 after round 2 and closed -109 -> diagnosing round 3 | open orders 0 | errors 13: one 403 Trading halted at a close, one rollover 404, one 429 rate limit (shared team budget)
+2026-10-24 06:50 | DIAGNOSIS season 248 (-109 after +3301 at the round-2 close): round 3 (Vic, mild chain storm, loss 69; season loss 1026, HAVEN settles 37.46 vs 27.19 at the round-3 open). At 06:22 the house moved HAVEN 27.7 -> 35 within a minute of the first advisory; the model still carried the unconditional (mean) loss for round 3, so its HAVEN fair stayed near 27-30 and the book shorted 250 HAVEN at 35, then churned (17 sign flips in the season, 10 on PORT; position-times-mid for the season +1139 but the season mark -109, so about -1250 was fills and spread). The research book makes +3599 on this season in-sample, so the gap is execution and timing, not the view. By sleeve over 7 live seasons: HAVEN net +1686, PORT net +5161, RECON mixed: no sleeve is a net loser, the losses are variance plus churn. Priority-1 candidate: widen LIVE_PER_NAME_DEADBAND (replaying 0.25 and 0.35 now); apply at the next ready gap if not worse five marks late.
