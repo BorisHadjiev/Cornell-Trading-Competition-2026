@@ -36,10 +36,17 @@ class OrderRuleTests(unittest.TestCase):
         self.assertEqual(live.limit_price("buy", 10.0, 10.2, 10.5), 10.2)
         self.assertEqual(live.limit_price("sell", 10.0, 10.2, 9.9), 10.19)
         self.assertEqual(live.limit_price("sell", 10.0, 10.2, 9.5), 10.0)
-        # A tight book is not crossed by the improvement: the tick is capped at a quarter spread.
-        self.assertEqual(live.rest_tick(10.0, 10.02), 0.005)
-        self.assertEqual(live.limit_price("buy", 10.0, 10.02, 10.0), 10.005)
+        # A tight book gets no improvement: a half-cent price is rejected by the exchange, so the
+        # rest joins the touch. Four cents of spread is the first width that earns a one-cent tick.
+        self.assertEqual(live.rest_tick(10.0, 10.02), 0.0)
+        self.assertEqual(live.limit_price("buy", 10.0, 10.02, 10.0), 10.0)
+        self.assertEqual(live.rest_tick(10.0, 10.03), 0.0)
+        self.assertEqual(live.rest_tick(10.0, 10.04), 0.01)
         self.assertEqual(live.rest_tick(10.0, 10.0), 0.0)
+        # Every price the runner sends is a whole cent.
+        self.assertEqual(live.round_price(49.155), 49.16)
+        self.assertEqual(live.round_price(49.1549), 49.15)
+        self.assertEqual(live.limit_price("sell", 49.153, 49.177, 40.0, reducing=True), 49.15)
 
     def test_etf_mark_sleeve_is_not_an_order(self) -> None:
         total = np.arange(len(NAMES), dtype=float)

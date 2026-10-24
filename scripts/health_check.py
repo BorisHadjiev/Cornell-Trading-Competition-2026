@@ -37,6 +37,11 @@ def main() -> None:
     held = {name: int(qty) for name, qty in positions.items() if abs(qty) >= 1}
     print("positions:", held)
     print("season mark (realized+unrealized):", round(live.season_mark(marks) or 0.0, 2))
+    print("per-name mark:", {name: round(v, 0) for name, v in sorted(marks.items(), key=lambda kv: kv[1]) if abs(v) >= 1})
+    with (ROOT / "overnight_marks.jsonl").open("a") as handle:
+        handle.write(json.dumps({"t": time.time(), "competition_id": clock.get("competition_id"),
+                                 "fictional_time": clock.get("fictional_time"), "state": clock.get("state"),
+                                 "season_mark": live.season_mark(marks), "marks": marks, "positions": held}) + "\n")
     orders = live.parse_orders(ex.get("/api/v1/orders/open"))
     print(f"open orders: {len(orders)}")
     log = ROOT / "overnight.log"

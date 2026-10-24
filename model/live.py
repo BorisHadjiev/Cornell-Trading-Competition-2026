@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import time
 import urllib.error
@@ -135,17 +136,31 @@ def redact(text: str, secret: str) -> str:
     return text
 
 
+# The exchange rejects a price that is not a whole cent ("Price must be a multiple of 0.01",
+# seen live on 24 Oct), whatever the packet says about six decimals.
+PRICE_STEP = 0.01
+
+
+def round_price(price: float) -> float:
+    return round(math.floor(float(price) / PRICE_STEP + 0.5 + 1e-9) * PRICE_STEP, 2)
+
+
 def rest_tick(bid: float, ask: float) -> float:
-    """How far inside the touch a rest sits: REST_IMPROVE, but never more than a quarter spread."""
+    """How far inside the touch a rest sits: one cent, but never more than a quarter spread.
+
+    A spread under four cents gets no improvement (a half-cent price is rejected), so the rest
+    joins the touch.
+    """
     spread = float(ask) - float(bid)
     tick = min(float(REST_IMPROVE), 0.25 * spread)
-    return round(tick, 6) if tick >= 1e-6 else 0.0
+    tick = math.floor(tick / PRICE_STEP + 1e-9) * PRICE_STEP
+    return round(tick, 2) if tick >= PRICE_STEP - 1e-9 else 0.0
 
 
 def rest_price(side: str, bid: float, ask: float) -> float:
     """Where an opening order rests: one tick inside the house touch, first in the queue."""
     tick = rest_tick(bid, ask)
-    return round(float(bid) + tick, 6) if side == "buy" else round(float(ask) - tick, 6)
+    return round_price(float(bid) + tick) if side == "buy" else round_price(float(ask) - tick)
 
 
 def limit_price(side: str, bid: float, ask: float, fair: float, reducing: bool = False) -> float | None:
@@ -160,11 +175,11 @@ def limit_price(side: str, bid: float, ask: float, fair: float, reducing: bool =
     spread = float(ask - bid)
     if side == "buy":
         if reducing or (not LIVE_SPREAD_CROSSING and float(fair - ask) > spread):
-            return float(ask)
+            return round_price(ask)
         return rest_price("buy", bid, ask)
     if side == "sell":
         if reducing or (not LIVE_SPREAD_CROSSING and float(bid - fair) > spread):
-            return float(bid)
+            return round_price(bid)
         return rest_price("sell", bid, ask)
     return None
 
@@ -2005,6 +2020,7 @@ class Runner:
             self.note("budget", action="place", symbol=order["symbol"])
             return "dropped"
         payload = {key: order[key] for key in ("symbol", "side", "order_type", "quantity", "price")}
+        payload["price"] = round_price(payload["price"])
         try:
             response = self.exchange.post("/api/v1/orders", payload)
         except RuntimeError as exc:
