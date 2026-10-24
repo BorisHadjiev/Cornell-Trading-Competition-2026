@@ -675,6 +675,22 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual(fresh, set(NAMES))
         self.assertFalse(any(order["id"].startswith("o") for order in runner.exchange.orders.values()))
 
+    def test_the_biggest_dollar_gap_goes_first_and_legs_stay_in_order(self) -> None:
+        target = np.zeros(len(NAMES))
+        target[NAMES.index("PORT")] = -20.0
+        target[NAMES.index("HAVEN")] = -200.0
+        fair = np.full(len(NAMES), 10.0)
+        fair[NAMES.index("HAVEN")] = 5.0
+        quotes = {name: {"bid": 10.0, "ask": 10.2} for name in NAMES}
+        planned = [
+            {"symbol": "PORT", "side": "sell", "quantity": 20},
+            {"symbol": "HAVEN", "side": "sell", "quantity": 40, "reducing": True},
+            {"symbol": "HAVEN", "side": "sell", "quantity": 160, "reducing": True},
+        ]
+        ordered = live.by_priority(planned, target, fair, {}, quotes)
+        self.assertEqual([(order["symbol"], order["quantity"]) for order in ordered],
+                         [("HAVEN", 40), ("HAVEN", 160), ("PORT", 20)])
+
     def test_an_announcement_without_a_numeric_round_is_kept_in_the_current_round(self) -> None:
         season = live.blank_season(live.packet_open_vector(), np.datetime64("2026-08-03T09:30:00", "s"))
         season.rounds[1] = 2
@@ -684,6 +700,7 @@ class StateAndCatchUpTests(unittest.TestCase):
                 "headline": "Port closed for two months", "symbols": ["PORT"], "seq": index,
             })
         self.assertEqual([event["round"] for event in season.events], [2, 2, 3])
+
 
 if __name__ == "__main__":
     unittest.main()
