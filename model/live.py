@@ -6,8 +6,10 @@ damage, and ETF orders stay off for the whole season. That is not a refit.
 
 If the exchange season mark (realized plus unrealized) reaches -400 while the
 location book is on, cancel, flatten, and only the backup trades for the rest
-of the season. At -800, flatten and send no more risk. A backup name that
-loses 150 is closed for the season. Those three numbers are pre-set bounds.
+of the season. At -800, flatten and send no more risk. Any name, on either
+book, is flattened when its own exchange mark is through -150, and it is not
+reopened. Those three numbers are pre-set bounds. A round-end or cap exit
+uses the last two-sided quote when the live quote is empty, and it crosses.
 
 Both books size an order as target minus the exchange position minus the
 working leaves. A cancel that comes back already filled (409) is a fill, and
@@ -178,6 +180,37 @@ def targets_for_live(state: dict, models: Models, season, bar: int):
 def target_is_dead(target_qty: float, limit: float) -> bool:
     """The name is inside the deadband of flat, so the target no longer wants it."""
     return abs(float(target_qty)) <= DEADBAND_FRACTION * float(limit) + 1e-9
+
+
+def two_sided(quote: dict | None) -> bool:
+    """A quote we can cross: both sides present, and the ask is not through the bid."""
+    if not isinstance(quote, dict):
+        return False
+    bid, ask = _number(quote.get("bid")), _number(quote.get("ask"))
+    return bid is not None and ask is not None and np.isfinite(bid) and np.isfinite(ask) and ask >= bid
+
+
+def exit_quotes(current: dict[str, dict], last: dict[str, dict]) -> dict[str, dict]:
+    """Live touch when it is two-sided. Otherwise the last two-sided quote.
+
+    Round-end and cap exits use this. An empty print at the bell does not
+    cancel the exit. New risk still requires the live quote.
+    """
+    out: dict[str, dict] = {}
+    for name in set(current) | set(last):
+        live = current.get(name)
+        chosen = live if two_sided(live) else last.get(name)
+        if two_sided(chosen):
+            out[name] = chosen
+    return out
+
+
+def names_past_cap(marks: dict[str, float], blocked: set[str]) -> list[str]:
+    """Names whose exchange mark is through the pre-set per-name bound.
+
+    The book mode is not an input. Location and backup both use this.
+    """
+    return [name for name, pnl in marks.items() if name not in blocked and name_capped(pnl)]
 
 
 def marketable_flatten(name: str, position: float, resting: list[dict], quote: dict | None) -> dict | None:
@@ -963,6 +996,9 @@ class Runner:
         self.book_log_path = book_log
         self.max_seconds = max_seconds
         self.quotes: dict[str, dict] = {}
+        self.last_two_sided: dict[str, dict] = {}
+        self._flatten_missing: tuple[str, ...] | None = None
+        self._cap_quote_warned: set[str] = set()
         self.seen_seq: set[int] = set()
         self.announcements: list[dict] = []
         self.budget = ActionBudget()
@@ -1170,12 +1206,71 @@ class Runner:
                 return "stop" if updated == STOPPED else "flatten"
         if self.book == STOPPED:
             return "stop"
-        if self.book == BACKUP:
-            for name, pnl in self.marks.items():
-                if name_capped(pnl) and name not in self.blocked:
-                    self.blocked.add(name)
-                    self.note("name_cap", symbol=name, pnl=pnl)
         return "trade"
+
+    def _take_quote(self, data: dict) -> None:
+        symbol = data.get("symbol")
+        if not symbol:
+            return
+        symbol = str(symbol)
+        self.quotes[symbol] = data
+        if two_sided(data):
+            self.last_two_sided[symbol] = {"bid": float(data["bid"]), "ask": float(data["ask"])}
+
+    def _exit_quotes(self) -> dict[str, dict]:
+        return exit_quotes(self.quotes, self.last_two_sided)
+
+    def _flatten_capped_names(self) -> None:
+        """Flatten a name the moment its exchange mark is through −150, on either book."""
+        for name in names_past_cap(self.marks, self.blocked):
+            self.blocked.add(name)
+            self.note("name_cap", symbol=name, pnl=self.marks.get(name), book=self.book)
+        quotes = self._exit_quotes()
+        resting: dict[str, list[dict]] = {name: [] for name in NAMES}
+        for order in self.open_orders:
+            symbol = order.get("symbol")
+            if symbol in resting:
+                resting[symbol].append(order)
+        plans = []
+        missing = []
+        for name in sorted(self.blocked):
+            pos = float(self.position.get(name, 0.0))
+            if abs(pos) < 1.0 and not resting[name]:
+                self._cap_quote_warned.discard(name)
+                continue
+            if quotes.get(name) is None and abs(pos) >= 1.0:
+                missing.append(name)
+            plan = marketable_flatten(name, pos, resting[name], quotes.get(name))
+            if plan:
+                plans.append(plan)
+        newly_missing = [name for name in missing if name not in self._cap_quote_warned]
+        if newly_missing:
+            self._cap_quote_warned.update(newly_missing)
+            self.note("flatten", why="name_cap_no_quote", symbols=newly_missing)
+        if not plans:
+            return
+        self.note("flatten", why="name_cap", orders=len(plans), symbols=sorted({str(order["symbol"]) for order in plans}))
+        for _ in range(4):
+            if self._submit_plans(plans):
+                break
+            quotes = self._exit_quotes()
+            resting = {name: [] for name in NAMES}
+            for order in self.open_orders:
+                symbol = order.get("symbol")
+                if symbol in resting:
+                    resting[symbol].append(order)
+            plans = []
+            for name in sorted(self.blocked):
+                plan = marketable_flatten(name, float(self.position.get(name, 0.0)), resting[name], quotes.get(name))
+                if plan:
+                    plans.append(plan)
+            if not plans:
+                break
+        try:
+            self.refresh_account()
+        except RuntimeError as exc:
+            self.errors.append(str(exc))
+            self.note("error", where="name_cap", message=str(exc))
 
     def _scan_backup(self) -> None:
         rnd = int(self.season.rounds[1])
@@ -1213,7 +1308,7 @@ class Runner:
                 continue
             if only is not None and name not in only:
                 continue
-            plan = marketable_flatten(name, self.position.get(name, 0.0), resting[name], self.quotes.get(name))
+            plan = marketable_flatten(name, self.position.get(name, 0.0), resting[name], self._exit_quotes().get(name))
             if plan:
                 plans.append(plan)
         adjusted = target.copy()
@@ -1284,16 +1379,16 @@ class Runner:
             self.errors.append(str(exc))
             self.note("error", where="account", message=str(exc))
             return
+        self._flatten_capped_names()
         mode = self._apply_caps()
         if mode in ("flatten", "stop"):
             self.last_target = np.zeros(len(NAMES))
-            if self._books_ready():
-                self._sync_mark()
-                for _ in range(4):
-                    plans = flatten_all_orders(self.position, self.open_orders, self.quotes)
-                    self.note("flatten", why=self.book, orders=len(plans))
-                    if self._submit_plans(plans):
-                        break
+            self._sync_mark()
+            for _ in range(4):
+                plans = flatten_all_orders(self.position, self.open_orders, self._exit_quotes())
+                self.note("flatten", why=self.book, orders=len(plans))
+                if self._submit_plans(plans):
+                    break
             if mode == "stop" or self._has_position():
                 return
         if self.announce_cancel or reason == "announcement":
@@ -1336,7 +1431,7 @@ class Runner:
         if not self.carry_done:
             self.carry_done = True
             if any(self.saw_inventory.values()):
-                carried = flatten_all_orders(self.position, self.open_orders, self.quotes)
+                carried = flatten_all_orders(self.position, self.open_orders, self._exit_quotes())
                 self.note("flatten", why="carry", orders=len(carried))
                 self._submit_plans(carried)
                 return
@@ -1351,6 +1446,8 @@ class Runner:
                 fair = self._touch_fair()
             else:
                 state, target, fair = self._load_target()
+            for name in self.blocked:
+                target[NAMES.index(name)] = 0.0
         except Exception as exc:
             self.errors.append(str(exc))
             self.note("error", where="target", message=str(exc))
@@ -1393,24 +1490,53 @@ class Runner:
         """
         if self.flattened_on_exit:
             return
-        if not self._books_ready():
-            self.note("flatten", why="no quotes")
-            return
-        self.flattened_on_exit = True
-        self._sync_mark()
         try:
             self.refresh_account()
         except Exception as exc:
             self.errors.append(str(exc))
             self.note("error", where="flatten", message=str(exc))
-            self.flattened_on_exit = False
             return
+        quotes = self._exit_quotes()
+        open_names = [name for name in NAMES if abs(float(self.position.get(name, 0.0))) >= 1.0]
+        missing = tuple(name for name in open_names if name not in quotes)
+        if missing:
+            if missing != self._flatten_missing:
+                self._flatten_missing = missing
+                self.note("flatten", why="no quotes", symbols=list(missing))
+            if not any(name in quotes for name in open_names):
+                return
+        else:
+            self._flatten_missing = None
+        self._sync_mark()
         for _ in range(4):
-            plans = flatten_all_orders(self.position, self.open_orders, self.quotes)
+            plans = flatten_all_orders(self.position, self.open_orders, self._exit_quotes())
             self.note("flatten", orders=len(plans), why="round_end")
             if self._submit_plans(plans):
-                return
-        self.flattened_on_exit = False
+                break
+        try:
+            self.refresh_account()
+        except RuntimeError as exc:
+            self.errors.append(str(exc))
+            self.note("error", where="flatten", message=str(exc))
+            return
+        if missing:
+            return
+        resting: dict[str, list[dict]] = {name: [] for name in NAMES}
+        for order in self.open_orders:
+            symbol = order.get("symbol")
+            if symbol in resting:
+                resting[symbol].append(order)
+        quotes = self._exit_quotes()
+        still_open = []
+        for name in NAMES:
+            pos = float(self.position.get(name, 0.0))
+            if abs(pos) < 1.0:
+                continue
+            plan = marketable_flatten(name, pos, resting[name], quotes.get(name))
+            if plan and "side" in plan:
+                still_open.append(name)
+        if not still_open:
+            self.flattened_on_exit = True
 
     def _replace(self, order: dict) -> str:
         results = [
@@ -1481,6 +1607,14 @@ class Runner:
                 self.note("error", where="clock", message=str(exc))
         if self._halt_state:
             return
+        try:
+            self.refresh_account()
+        except RuntimeError as exc:
+            if not self._book_error:
+                self._book_error = True
+                self.note("error", where="book_log", message=str(exc))
+        else:
+            self._flatten_capped_names()
         if self.round_open and self.book == STOPPED and self._has_position():
             self.act("timer")
         self.write_book_log()
@@ -1543,7 +1677,7 @@ class Runner:
             book_task.cancel()
 
     async def _book_loop(self) -> None:
-        """Log the book once a second. The write does not place an order."""
+        """Once a second, log the book and flatten any name through the name cap."""
         try:
             while time.time() - self.started < self.max_seconds and self._halt_state is None:
                 async with self._act_lock:
@@ -1594,7 +1728,7 @@ class Runner:
                             return
                         kind = data.get("type")
                         if kind == "quote":
-                            self.quotes[data["symbol"]] = data
+                            self._take_quote(data)
                             if len(self.quotes) >= len(NAMES) and self.last_decision == 0.0:
                                 self.last_decision = time.time()
                                 self._kick("quotes")

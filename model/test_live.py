@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from model import live
-from model.config import NAMES
+from model.config import NAME_LOSS_CAP, NAMES
 
 
 class CredentialTests(unittest.TestCase):
@@ -331,6 +331,28 @@ class OrderRuleTests(unittest.TestCase):
         self.assertFalse(live.allows_round_order(1, True, 50, "sell", 80))
         self.assertFalse(live.allows_round_order(-1, True, 0, "buy", 10))
         self.assertTrue(live.allows_round_order(-1, True, -140, "buy", 140))
+
+    def test_an_empty_quote_still_crosses_the_last_two_sided_touch(self) -> None:
+        last = {"ISLE": {"bid": 10.0, "ask": 10.4}, "GRID": {"bid": 19.8, "ask": 20.0}}
+        current = {"ISLE": {"bid": None, "ask": None}, "GRID": {}}
+        quotes = live.exit_quotes(current, last)
+        position = {name: 0.0 for name in NAMES}
+        position["ISLE"] = -30.0
+        position["GRID"] = 40.0
+        plans = {order["symbol"]: order for order in live.flatten_all_orders(position, [], quotes)}
+        self.assertEqual(plans["ISLE"]["side"], "buy")
+        self.assertEqual(plans["ISLE"]["price"], 10.4)
+        self.assertEqual(plans["ISLE"]["quantity"], 30)
+        self.assertTrue(plans["ISLE"]["reducing"])
+        self.assertEqual(plans["GRID"]["side"], "sell")
+        self.assertEqual(plans["GRID"]["price"], 19.8)
+        self.assertEqual(plans["GRID"]["quantity"], 40)
+        self.assertEqual(live.exit_quotes({"AQUA": {"bid": None, "ask": None}}, {}), {})
+
+    def test_the_name_cap_does_not_wait_for_the_backup_book(self) -> None:
+        self.assertEqual(NAME_LOSS_CAP, 150.0)
+        self.assertEqual(live.names_past_cap({"PORT": -150.0, "ISLE": -149.0}, set()), ["PORT"])
+        self.assertEqual(live.names_past_cap({"PORT": -267.67}, {"PORT"}), [])
 
     def test_a_round_end_flattens_a_name_the_target_still_wants(self) -> None:
         position = {name: 0.0 for name in NAMES}

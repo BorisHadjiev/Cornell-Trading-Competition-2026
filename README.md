@@ -76,7 +76,7 @@ Do not commit the key. `model/fitted.json` is already in the repo, so a live ses
 
 The live book is the location sleeve on PORT, ISLE, AQUA, GRID, and FERRY from the first order. Severity, the insurer kink, composition, revision, known damage, and ETF orders stay off for the whole season. The reserve on PORT still applies. This is not a refit.
 
-If the exchange season mark (realized plus unrealized) reaches −400, cancel, flatten, and only the backup trades for the rest of the season. At −800, flatten and send no more risk. A backup name at −150 is flattened and not reopened. Those three bounds are pre-set. They were not fit on seasons 1–500 or 501–600, and the table below was not used to move them.
+If the exchange season mark (realized plus unrealized) reaches −400, cancel, flatten, and only the backup trades for the rest of the season. At −800, flatten and send no more risk. Any name on either book is flattened as soon as its own exchange mark is through −150, and it is not reopened. Those three bounds are pre-set. They were not fit on seasons 1–500 or 501–600, and the table below was not used to move them.
 
 The backup sells about 10% of the limit, at most once per name per storm, when an official advisory puts one of that company's islands at 80%. No overnight carry and no add after the name is open.
 
@@ -89,7 +89,7 @@ Backup on seasons 1–500, case dollars. Seasons 501–600 were not scored.
 | 5 marks later | 486.54 | 521.95 | −46.30 |
 | Crowded island short | 485.92 | 519.05 | −46.57 |
 
-An order is target minus the exchange position minus working leaves. A cancel that returns already filled is a fill, and the account is reread before the next order. A rest uses the live touch. A reduction crosses. An announcement cancels resting orders. The book is flat when the round leaves `running`.
+An order is target minus the exchange position minus working leaves. A cancel that returns already filled is a fill, and the account is reread before the next order. A rest uses the live touch. A reduction crosses. An announcement cancels resting orders. The book is flat when the round leaves `running`. A round-end exit and a cap exit still go out when that second's quote is empty: they cross the last two-sided quote.
 
 Each second of `book-log.jsonl` has, for every name, bid, ask, house mark, target, exchange position, and working quantity. The house mark is the quote's mark, or last or price if that is the field the feed sends. Working quantity is signed, and a sell is negative. The log does not place an order.
 
