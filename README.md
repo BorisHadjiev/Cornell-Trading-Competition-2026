@@ -26,15 +26,17 @@ A round-1 price against season-end settlement is not a house mistake. Later stor
 
 | Strategy | What it is | State |
 |---|---|---|
-| Location | Trade the path once direct, chain, and recurve separate | On. Still pays if the fill is a few marks late |
-| Insurer kink | HAVEN vs REIN from season-to-date insured loss, only near a boundary | On. Knots agreed across two training halves |
-| Composition | Long the rebuilder who gets that hit, short the one who does not | On. Still pays if the fill is late |
-| Severity | Radius and intensity, without betting the landfall | Small. Do not size it up |
-| Revision | Preliminary damage vs the final report | 35% size. Loses money if the fill is late |
-| Known damage | Trade assessed damage after the final report | 35% size. Loses money if the fill is late |
-| ETF gap | House mark vs the basket | Off until the live book shows a gap after the spread |
-| Limit reserve | Half of PORT, ARCH, and REIN held back from the first advisory | On. Kept on the crowded-fill test |
-| Pair over location | Shrink the one-name location trade when a composition or insurer pair is already on | On. Kept together with the reserve |
+| Location | Trade the path once direct, chain, and recurve separate | On. The live book is this sleeve, on the physical names, from the first order |
+| Insurer kink | HAVEN vs REIN from season-to-date insured loss, only near a boundary | Off for the whole season |
+| Composition | Long the rebuilder who gets that hit, short the one who does not | Off for the whole season |
+| Severity | Radius and intensity, without betting the landfall | Off |
+| Revision | Preliminary damage vs the final report | Off for the whole season |
+| Known damage | Trade assessed damage after the final report | Off for the whole season |
+| ETF gap | House mark vs the basket | Off. No create or redeem |
+| Limit reserve | Half of PORT, ARCH, and REIN held back from the first advisory | On for the location book |
+| Pair over location | Shrink the one-name location trade when a composition or insurer pair is already on | Off. Those pairs are not on |
+
+The live process sends that table. The holdout numbers below are the research book, not this season's orders.
 
 Held-out season profit after the 35% cut, in case dollars, 100 seasons:
 
@@ -52,10 +54,10 @@ If the obvious island short fills 5 marks later and the pair trades still fill o
 
 1. Do not chase the first advisory. If the price is already at our value, add nothing. If it has gone past us and the book is one-sided, fade a little. If it has not reached us, join, and do not pay through.
 2. Keep half of PORT, ARCH, and REIN for the turn in the track and for the insurers. The first advisory cannot use all of it.
-3. Prefer a pair (composition, or HAVEN vs REIN) to a one-name island short.
+3. The live book does not trade a pair. It is the location sleeve, then the backup.
 4. Cross the spread only when the gap is wider than the spread. Otherwise rest. Reductions cross. Resting orders are cancelled at the house half-life. The whole book is flattened when the round ends. After a name opens, that round only reduces it. Do not cancel and replace every two seconds.
 5. For about 45 seconds after an announcement, do not fade the mark. Research seasons have no announcements. This is a live rule, not a fitted lag.
-6. Create or redeem only when both books still disagree after the spread.
+6. Do not create or redeem.
 7. Obvious island trades are treated as slow fills. Pair trades may still be fast. A change stays only if the late-fill season does not get worse, and the sign agrees in at least 3 of 4 blocks of 25 holdout seasons.
 
 ## Run on a laptop
@@ -68,22 +70,28 @@ export CTC_API_KEY=your-bot-key
 python -m model.live
 ```
 
-Do not commit the key. `model/fitted.json` is already in the repo, so a live session does not need the research zip. The research zip is only for a refit.
+Do not commit the key. `model/fitted.json` is already in the repo, so a live session does not need the research zip. The research zip is only for a refit. The process stays up for 4 hours by default, including the ready gaps between rounds, and appends `book-log.jsonl` every second.
 
 ## Prototype
 
-The bot we run uses the competition book, not the empty-book maximum (next-mark mean 7,374).
+The live book is the location sleeve on PORT, ISLE, AQUA, GRID, and FERRY from the first order. Severity, the insurer kink, composition, revision, known damage, and ETF orders stay off for the whole season. The reserve on PORT still applies. This is not a refit.
 
-- Reserve half of PORT, ARCH, and REIN until the track turns.
-- Shrink the location add when a composition or insurer pair is already on.
-- Revision and known-damage at 35% of the original sleeve.
-- The severity sleeve is 0. Location and the other sleeves stay.
-- The book does not carry across a round. A name that has opened is only reduced for the rest of that round.
-- No ETF orders until a live book shows a gap after the spread.
-- Announcement stand-down is on.
-- The first testnet session is one season at fractional size.
+If the exchange season mark (realized plus unrealized) reaches −400, cancel, flatten, and only the backup trades for the rest of the season. At −800, flatten and send no more risk. Any name on either book is flattened as soon as its own exchange mark is through −150, and it is not reopened. Those three bounds are pre-set. They were not fit on seasons 1–500 or 501–600, and the table below was not used to move them.
 
-Crowded-fill result for this stack: mean 5,676, median 5,060, 10th percentile 354. Empty-book next-mark result after these rules: mean 6,336, median 5,824, 10th percentile 1,207.
+The backup sells about 10% of the limit, at most once per name per storm, when an official advisory puts one of that company's islands at 80%. No overnight carry and no add after the name is open.
+
+Backup on seasons 1–500, case dollars. Seasons 501–600 were not scored.
+
+| Fill | Mean | Median | 10th percentile |
+|---|---:|---:|---:|
+| Next mark | 544.93 | 550.85 | −16.19 |
+| 2 marks later | 482.20 | 517.30 | −60.24 |
+| 5 marks later | 486.54 | 521.95 | −46.30 |
+| Crowded island short | 485.92 | 519.05 | −46.57 |
+
+An order is target minus the exchange position minus working leaves. A cancel that returns already filled is a fill, and the account is reread before the next order. A rest uses the live touch. A reduction crosses. An announcement cancels resting orders. The book is flat when the round leaves `running`. A round-end exit and a cap exit still go out when that second's quote is empty: they cross the last two-sided quote.
+
+Each second of `book-log.jsonl` has, for every name, bid, ask, house mark, target, exchange position, and working quantity. The house mark is the quote's mark, or last or price if that is the field the feed sends. Working quantity is signed, and a sell is negative. The log does not place an order.
 
 ## What we will not add
 

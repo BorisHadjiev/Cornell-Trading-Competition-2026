@@ -30,6 +30,14 @@ BASELINE_CLIP = 0.1
 # Spread crossing needs a book. market.csv has no spread, so research fills stay on the house mark.
 LIVE_ANNOUNCEMENT_STAND_DOWN = True
 LIVE_SPREAD_CROSSING = False
+# Create/redeem stays off. There is no live ETF exception.
+LIVE_ETF_ORDERS = False
+
+# Pre-set loss bounds. Not estimated, not fit on seasons 1–500 or 501–600,
+# and not chosen by looking at a backtest table.
+NAME_LOSS_CAP = 150.0
+BOOK_SWITCH_LOSS = 400.0
+SEASON_STOP_LOSS = 800.0
 
 # Structural groups from the case text and the architecture, not estimated.
 CLASSES = ("direct", "chain", "recurve", "stall", "eyewall", "erratic")
