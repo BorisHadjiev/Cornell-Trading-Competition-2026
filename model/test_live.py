@@ -675,5 +675,21 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual(fresh, set(NAMES))
         self.assertFalse(any(order["id"].startswith("o") for order in runner.exchange.orders.values()))
 
+    def test_the_biggest_dollar_gap_goes_first_and_legs_stay_in_order(self) -> None:
+        target = np.zeros(len(NAMES))
+        target[NAMES.index("PORT")] = -20.0
+        target[NAMES.index("HAVEN")] = -200.0
+        fair = np.full(len(NAMES), 10.0)
+        fair[NAMES.index("HAVEN")] = 5.0
+        quotes = {name: {"bid": 10.0, "ask": 10.2} for name in NAMES}
+        planned = [
+            {"symbol": "PORT", "side": "sell", "quantity": 20},
+            {"symbol": "HAVEN", "side": "sell", "quantity": 40, "reducing": True},
+            {"symbol": "HAVEN", "side": "sell", "quantity": 160, "reducing": True},
+        ]
+        ordered = live.by_priority(planned, target, fair, {}, quotes)
+        self.assertEqual([(order["symbol"], order["quantity"]) for order in ordered],
+                         [("HAVEN", 40), ("HAVEN", 160), ("PORT", 20)])
+
 if __name__ == "__main__":
     unittest.main()

@@ -1275,6 +1275,24 @@ def decide_orders(
     return planned
 
 
+def by_priority(planned: list[dict], target: np.ndarray, fair: np.ndarray, position: dict[str, float],
+                quotes: dict[str, dict]) -> list[dict]:
+    """Biggest dollar gap first, so a spent action budget drops the smallest trades, not
+    whichever names come last in NAMES (the insurers and the ETFs). A name's legs keep their order.
+    """
+    def dollars(name: str) -> float:
+        index = IDX[name]
+        quote = quotes.get(name)
+        if not two_sided(quote):
+            return 0.0
+        mid = 0.5 * (float(quote["bid"]) + float(quote["ask"]))
+        gap = abs(float(target[index]) - float(position.get(name, 0.0)))
+        return gap * abs(float(fair[index]) - mid)
+
+    rank = {name: dollars(name) for name in {str(order["symbol"]) for order in planned}}
+    return sorted(planned, key=lambda order: -rank[str(order["symbol"])])
+
+
 class StateStore:
     """Append-only season state, one JSON line per record, keyed by competition id.
 
@@ -1870,7 +1888,7 @@ class Runner:
             )
             if only is not None:
                 planned = [order for order in planned if order["symbol"] in only]
-            plans.extend(planned)
+            plans.extend(by_priority(planned, target, fair, self.position, self.quotes))
         plans = screen_round_orders(plans, self.position, self.round_side, self.saw_inventory)
         return plans, holding
 
