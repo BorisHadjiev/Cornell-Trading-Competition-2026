@@ -675,5 +675,15 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual(fresh, set(NAMES))
         self.assertFalse(any(order["id"].startswith("o") for order in runner.exchange.orders.values()))
 
+    def test_an_announcement_without_a_numeric_round_is_kept_in_the_current_round(self) -> None:
+        season = live.blank_season(live.packet_open_vector(), np.datetime64("2026-08-03T09:30:00", "s"))
+        season.rounds[1] = 2
+        for index, rnd in enumerate((None, "pre-season", "3")):
+            live.apply_news(season, {
+                "type": "announcement", "round": rnd, "storm": None, "time": f"2026-08-03T10:0{index}:00",
+                "headline": "Port closed for two months", "symbols": ["PORT"], "seq": index,
+            })
+        self.assertEqual([event["round"] for event in season.events], [2, 2, 3])
+
 if __name__ == "__main__":
     unittest.main()
