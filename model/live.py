@@ -662,6 +662,18 @@ def _insert_obs(storm, row: np.ndarray, when: np.datetime64) -> bool:
     return True
 
 
+def message_round(message: dict, fallback: int) -> int:
+    """The message's round, or the current round when it is missing or not a number.
+
+    The packet shows an announcement's round as a placeholder, and the research seasons have no
+    announcements, so a live one with a null or text round must not raise in the read loop.
+    """
+    try:
+        return int(message.get("round"))
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
 def apply_track(season, message: dict) -> int:
     """Fill observation gaps from a track message. Returns the number of rows added.
 
@@ -675,7 +687,7 @@ def apply_track(season, message: dict) -> int:
     points = message.get("points") or []
     if message.get("round") is None or len(points) < 2:
         return 0
-    rnd = int(message["round"])
+    rnd = message_round(message, int(season.rounds[1]))
     storm = next((item for item in season.storms if item.round == rnd), None)
     if storm is None:
         return 0
@@ -786,7 +798,7 @@ def apply_news(season, message: dict) -> None:
     if kind not in NEWS_TYPES:
         return
     when = _time(str(message["time"]))
-    rnd = int(message["round"])
+    rnd = message_round(message, int(season.rounds[1]))
     if when > season.times[1]:
         season.times[1] = when
     season.rounds[1] = rnd
@@ -2327,7 +2339,15 @@ class Runner:
                                 self.last_decision = time.time()
                                 self._kick("quotes")
                         elif kind == "news" and isinstance(data.get("message"), dict):
-                            if self.on_news(data["message"]):
+                            # One message the code does not expect must not drop the socket: a
+                            # reconnect misses every frame until the next 30-second snapshot.
+                            try:
+                                relevant = self.on_news(data["message"])
+                            except Exception as exc:  # noqa: BLE001
+                                self.note("error", where="news", type=data["message"].get("type"),
+                                          seq=data["message"].get("seq"), message=redact(str(exc), self.exchange.key))
+                                relevant = data["message"].get("type") == "announcement"
+                            if relevant:
                                 self._kick(str(data["message"].get("type") or "news"))
                         now = time.time()
                         if now - self.last_decision >= 60.0 and self.quotes:
