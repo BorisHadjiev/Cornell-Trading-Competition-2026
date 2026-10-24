@@ -394,11 +394,26 @@ def targets_from_state(
     # the disagree scale, the scenario caps, rebucket, and the reserve.
     if state.get("zero_severity"):
         sleeves["severity"] = np.zeros_like(sleeves["severity"])
+    # Live only. Research never sets this, so the fitted book is unchanged and
+    # this is not a refit. The order is the location residual on the physical
+    # names, then the same disagree scale, scenario caps, and reserve. The
+    # insurer kink, composition, revision, known damage, severity, and ETF
+    # stay at zero for the whole season.
+    if state.get("location_only"):
+        residual = (s_loc_full - s_sev).copy()
+        for index, name in enumerate(NAMES):
+            if name not in PHYSICAL:
+                residual[index] = 0.0
+        for name in sleeves:
+            sleeves[name] = np.zeros(len(NAMES))
+        sleeves["location"] = residual
     fundamental = portfolio.disagree_scale(sum(sleeves.values()), fair, stat, mark)
     # Put the disagree cut back into the sleeves in proportion.
     sleeves = portfolio._scale_to_match(sleeves, fundamental)
     etf = portfolio.etf_mark_sleeve(mark, models.limits, fraction)
     etf = portfolio.fit_inside_limits(fundamental, etf, models.limits)
+    if state.get("location_only"):
+        etf = np.zeros_like(etf)
     sleeves["etf_gap"] = etf
     scenario_values = {
         name: _scenario_value(models, opened, state["round"], finals, name)

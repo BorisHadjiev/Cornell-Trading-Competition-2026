@@ -67,9 +67,11 @@ class OrderRuleTests(unittest.TestCase):
 
     def test_a_ping_timeout_cannot_drop_the_last_two_minutes(self) -> None:
         self.assertGreaterEqual(live.PING_TIMEOUT_SECONDS, 120.0)
-        self.assertTrue(live.reconnect_after_read_failure("running"))
-        self.assertTrue(live.reconnect_after_read_failure(None))
-        self.assertFalse(live.reconnect_after_read_failure("ready"))
+        self.assertTrue(live.session_continues("running"))
+        self.assertTrue(live.session_continues(None))
+        self.assertTrue(live.session_continues("ready"))
+        self.assertFalse(live.session_continues("draft"))
+        self.assertFalse(live.session_continues("ended"))
 
     def test_action_budget_stops_under_the_team_cap(self) -> None:
         budget = live.ActionBudget(cap=2)
@@ -133,6 +135,58 @@ class OrderRuleTests(unittest.TestCase):
             [(order["quantity"], order["price"], order["reducing"]) for order in legs],
             [(100, 10.0, True), (30, 10.2, False)],
         )
+
+    def test_working_leaves_shrink_the_next_order(self) -> None:
+        limits = np.full(len(NAMES), 700.0)
+        target = np.zeros(len(NAMES))
+        target[NAMES.index("PORT")] = -50.0
+        fair = np.full(len(NAMES), 10.1)
+        quotes = {"PORT": {"bid": 10.0, "ask": 10.2}}
+        resting = [{
+            "symbol": "PORT", "side": "sell", "quantity": 40, "filled_quantity": 10,
+            "price": 10.2, "id": "keep",
+        }]
+        planned = live.decide_orders(target, fair, {"PORT": 0.0}, resting, quotes, limits, set())
+        self.assertEqual([(item["quantity"], item["cancel"]) for item in planned], [(20, [])])
+        self.assertEqual(live.execution_gap(-50, 0, -30), -20)
+
+    def test_a_wrong_price_is_cancelled_and_not_counted(self) -> None:
+        limits = np.full(len(NAMES), 700.0)
+        target = np.zeros(len(NAMES))
+        target[NAMES.index("PORT")] = -50.0
+        fair = np.full(len(NAMES), 10.1)
+        quotes = {"PORT": {"bid": 10.0, "ask": 10.2}}
+        resting = [{"symbol": "PORT", "side": "sell", "quantity": 40, "price": 10.0, "id": "old"}]
+        planned = live.decide_orders(target, fair, {"PORT": 0.0}, resting, quotes, limits, set())
+        self.assertEqual(planned[0]["quantity"], 50)
+        self.assertEqual(planned[0]["price"], 10.2)
+        self.assertEqual(planned[0]["cancel"], ["old"])
+
+    def test_a_409_is_a_fill(self) -> None:
+        self.assertEqual(live.after_cancel(["filled"]), "resync")
+        self.assertEqual(live.after_cancel(["cancelled"]), "resize")
+        self.assertEqual(live.after_cancel([]), "send")
+        filled = live.ExchangeError("DELETE", "/api/v1/orders/1", 409, "already filled")
+        self.assertEqual(live.cancel_result_from_error(filled), "filled")
+        other = live.ExchangeError("DELETE", "/api/v1/orders/1", 400, "no")
+        self.assertEqual(live.cancel_result_from_error(other), "failed")
+
+    def test_the_book_log_has_bid_ask_mark_target_position_and_working(self) -> None:
+        quotes = {"PORT": {"bid": 10.0, "ask": 10.2, "mark": 10.05}}
+        target = np.zeros(len(NAMES))
+        target[0] = -20.0
+        orders = [{"symbol": "PORT", "side": "sell", "quantity": 20, "filled_quantity": 5, "price": 10.2}]
+        row = live.book_snapshot(quotes, target, {"PORT": -5.0}, orders)
+        self.assertEqual(row["PORT"], {
+            "bid": 10.0,
+            "ask": 10.2,
+            "house_mark": 10.05,
+            "target": -20.0,
+            "position": -5.0,
+            "working": -15.0,
+        })
+        self.assertIsNone(row["ISLE"]["house_mark"])
+        self.assertIsNone(row["ISLE"]["bid"])
 
     def test_live_severity_sleeve_is_zero_and_research_is_not(self) -> None:
         from model.backtest import targets_from_state
@@ -220,23 +274,27 @@ class OrderRuleTests(unittest.TestCase):
 
         self.assertNotIn("zero_severity", state)
         self.assertNotIn("zero_severity", pre)
-        self.assertEqual(seen, [240.0, 40.0, 40.0])
+        self.assertNotIn("location_only", state)
+        self.assertNotIn("location_only", pre)
+        self.assertEqual(seen, [240.0, 0.0, 0.0])
         self.assertAlmostEqual(research["severity"][aqua], 100.0)
         self.assertAlmostEqual(research["location"][aqua], 30.0)
         self.assertAlmostEqual(research["known_damage"][aqua], 35.0)
         self.assertAlmostEqual(research["composition"][mat], 240.0)
         self.assertAlmostEqual(research["composition"][gen], 30.0)
         self.assertAlmostEqual(research["insurer_kink"][haven], 92.5)
+        self.assertAlmostEqual(_pre_total[aqua], 30.0)
+        self.assertEqual(_pre_total[mat], 0.0)
+        self.assertEqual(_pre_total[haven], 0.0)
         for sleeves in (early, late):
             self.assertEqual(sleeves["severity"][aqua], 0.0)
             self.assertAlmostEqual(sleeves["location"][aqua], 30.0)
-            self.assertAlmostEqual(sleeves["known_damage"][aqua], 35.0)
-            self.assertEqual(sleeves["severity"][mat], 0.0)
-            self.assertAlmostEqual(sleeves["composition"][mat], 40.0)
-            self.assertEqual(sleeves["severity"][haven], 0.0)
-            self.assertAlmostEqual(sleeves["insurer_kink"][haven], 12.5)
-        self.assertAlmostEqual(early["composition"][gen], 10.5)
-        self.assertAlmostEqual(late["composition"][gen], 30.0)
+            self.assertEqual(sleeves["known_damage"][aqua], 0.0)
+            self.assertEqual(sleeves["revision"][aqua], 0.0)
+            self.assertEqual(sleeves["composition"][mat], 0.0)
+            self.assertEqual(sleeves["composition"][gen], 0.0)
+            self.assertEqual(sleeves["insurer_kink"][haven], 0.0)
+            self.assertEqual(float(sleeves["etf_gap"][aqua]), 0.0)
 
     def test_a_resting_order_is_cancelled_after_its_house_half_life(self) -> None:
         half = live.published_half_lives()
