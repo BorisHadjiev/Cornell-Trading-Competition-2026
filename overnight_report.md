@@ -24,6 +24,25 @@ gap is churn (10 to 17 sign flips a season) and large reductions walking a thin 
 shown touch size. Not changed, with the replay that said no: insurer kink off (worse mean),
 ensemble 48 alone (2/4 blocks), location-only, round-end flatten, one-entry rule, loss caps.
 
+**07:45 update, 8 seasons: mean +260, 3 positive, the last 5 all negative (−2,419, −1,696,
+−4,180, −109, −854).** Where the money goes, per season on average, from the book log:
+
+| | Research book on these 8 seasons (next mark) | Research with fills 5 marks late | Live model view on the live target path | Live, cost of lagging the target | Live, fill drag and final-report moves | Live season mark |
+|---|---:|---:|---:|---:|---:|---:|
+| mean / season | +8,036 | +3,722 | +911 | −25 | −626 | +260 |
+
+So the live book is close to its own targets (lag ≈ 0) and fills cost about 600 a season; the
+gap to research is in the **target path itself**: the same model, deciding on live testnet mids,
+earns about 900 a season where it earns 8,000 on the research marks. Live mids differ from the
+research house marks by about $1.3 on PORT and HAVEN (90th percentile $3 to $5, ARCH $7 to $11),
+which is the size of the model's typical edge, so the book trades price noise from other
+participants as if it were mispricing and gets whipsawed (10 to 17 sign flips a season).
+
+**Implication for the competition:** the view is sound; the fix is to trade only edges that are
+clearly larger than the live noise (an edge floor around $1 or two spreads before opening or
+reversing a name, and no reversal inside a round without it). That cannot be scored by the
+research replay, which has no other participants, so it has to be judged on live seasons.
+
 **Open items for the morning:** per-name deadband 0.25/0.35 replay (churn), ensemble 48 + kink
 1.0 (passes 4/4 both fills, +755 / +380), the HAVEN valuation at the ends of the layer (fair
 off by 5-7 dollars in 246 and 247), and the shared 180-actions-a-minute budget (429s seen when
@@ -51,3 +70,4 @@ someone else was active on the team key).
 2026-10-24 06:49 | season 249 (id 7d19a254) round 1 | season mark +3759.90 | per-name: HAVEN +2717, RECON +387, GRID +329, PORT +313, MAT +118, AQUA +102, REIN -10, FERRY -12, ISLE -42, GEN -144 | completed: 242 +4038.67, 243 +2562.29, 244 +4733.88, 245 -2419.02, 246 -1696.25, 247 -4180.28, 248 -108.59 (7 seasons, 3 positive, mean +419) | 248 was +3301 after round 2 and closed -109 -> diagnosing round 3 | open orders 0 | errors 13: one 403 Trading halted at a close, one rollover 404, one 429 rate limit (shared team budget)
 2026-10-24 06:50 | DIAGNOSIS season 248 (-109 after +3301 at the round-2 close): round 3 (Vic, mild chain storm, loss 69; season loss 1026, HAVEN settles 37.46 vs 27.19 at the round-3 open). At 06:22 the house moved HAVEN 27.7 -> 35 within a minute of the first advisory; the model still carried the unconditional (mean) loss for round 3, so its HAVEN fair stayed near 27-30 and the book shorted 250 HAVEN at 35, then churned (17 sign flips in the season, 10 on PORT; position-times-mid for the season +1139 but the season mark -109, so about -1250 was fills and spread). The research book makes +3599 on this season in-sample, so the gap is execution and timing, not the view. By sleeve over 7 live seasons: HAVEN net +1686, PORT net +5161, RECON mixed: no sleeve is a net loser, the losses are variance plus churn. Priority-1 candidate: widen LIVE_PER_NAME_DEADBAND (replaying 0.25 and 0.35 now); apply at the next ready gap if not worse five marks late.
 2026-10-24 06:53 | replay: per-name deadband on the current book: 0.15 (current) 5-mark +46 (3/4 blocks), 0.25 5-mark -130 (1/4), 0.35 5-mark -195 (1/4); wider bands cut turnover (1.63M -> 1.1M / 0.93M) but fail the late-fill gate on the mean. No change: LIVE_PER_NAME_DEADBAND stays 0.15. The churn fix has to come from the target itself (ensemble 48 + kink 1.0 is the tested candidate), not from a wider band.
+2026-10-24 07:18 | season 249 (id 7d19a254) round 3 | season mark -191.82 (was +3760 in round 1) | per-name: HAVEN +1003, AQUA +335, ISLE +122, FERRY +28, GRID +13, REIN +7, MAT -22, GEN -190, RECON -682, PORT -805 | completed: 7 seasons, mean +419, 3 positive | no season completed since last check: no change | open orders 0 | errors 17: four new 429 Rate limit exceeded on order posts since the v4 restart even though the bot caps itself at 170 actions a minute; candidate execution change if a season closes negative on dropped orders: lower TEAM_ACTION_BUDGET to 120 and confirm nobody else is on the team key
