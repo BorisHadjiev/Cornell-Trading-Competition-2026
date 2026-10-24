@@ -83,3 +83,19 @@ The larger path ensemble reduces target noise (less churn, better tail) at three
 time per decision, which the live loop can afford. Block check: better in only 2 of 4 blocks at
 the next mark (+161) and 3 of 4 five marks late (+210), so under the team's 3-of-4 rule
 `ENSEMBLE_SIZE` stays at 16. It is the first candidate to retest once testnet spreads are known.
+
+## 4. Insurer gate width (after live season 246)
+
+| Row | Mean | Median | 10th pct | Losing | vs research | Blocks |
+|---|---:|---:|---:|---:|---:|---:|
+| Research book, KINK_PROXIMITY 0.35, next mark | 7,337 | 7,066 | 1,626 | 6 | | |
+| KINK_PROXIMITY 0.6, next mark | 7,886 | 8,257 | 1,229 | 8 | +549 | 4/4 |
+| **KINK_PROXIMITY 1.0, next mark** | 7,928 | 8,257 | 1,229 | 8 | +592 | 4/4 |
+| Research book, 5 marks late | 3,546 | 3,337 | −1,473 | 24 | | |
+| KINK_PROXIMITY 0.6, 5 marks late | 3,769 | 3,676 | −2,745 | 25 | +224 | 3/4 |
+| **KINK_PROXIMITY 1.0, 5 marks late** | 3,810 | 3,671 | −2,745 | 26 | +264 | 3/4 |
+| Ensemble 48 + kink 1.0, next mark | 8,092 | 8,084 | 1,042 | 7 | +755 | 4/4 |
+| Ensemble 48 + kink 1.0, 5 marks late | 3,926 | 4,395 | −2,562 | 25 | +380 | 4/4 |
+
+Applied: `KINK_PROXIMITY = 1.0` (one change for one losing season). The ensemble-48 combination
+passes too and is the next candidate once a further season is in.

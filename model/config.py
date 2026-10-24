@@ -19,7 +19,13 @@ LOCATION_GAP = 0.15
 # unconditional mean. Holdout replay, next-mark fill: 6,336 -> 7,337, better in 4 of 4 blocks of 25.
 LOCATION_GATE = "all"
 SCENARIO_CAP_DOLLARS = 4000.0
-KINK_PROXIMITY = 0.35
+# Insurer sleeve gate: HAVEN/REIN are traded when the estimated season loss is within this
+# fraction of the layer width of a knot. 0.35 left a dead zone in the middle of HAVEN's layer
+# (732-1006M) where the sleeve was switched off; live season 246 (24 Oct) lost its HAVEN short
+# there right before the payoff. 1.0 keeps the sleeve on across the whole layer. Holdout replay:
+# next-mark mean 7,337 -> 7,928 (4/4 blocks), 5-mark 3,546 -> 3,810 (3/4 blocks); the 10th
+# percentile is worse (1,626 -> 1,229), so this buys expectation with some tail.
+KINK_PROXIMITY = 1.0
 TURN_DEGREES = 25.0
 OUTAGE_TILT = 0.15
 CONE_WEIGHT = 0.25
