@@ -523,6 +523,14 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual([(o["quantity"], o["price"]) for o in plain], [(100, 10.0)])
         self.assertIsNone(live.touch_depth({"bid": 10.0, "ask": 10.2}, "sell"))
 
+    def test_reconnect_backoff_doubles_and_waits_a_minute_when_bots_are_disabled(self) -> None:
+        self.assertEqual(live.next_backoff(0.0, "no close frame received or sent"), 2.0)
+        self.assertEqual(live.next_backoff(2.0, "no close frame"), 4.0)
+        self.assertEqual(live.next_backoff(40.0, "no close frame"), 60.0)
+        self.assertEqual(live.next_backoff(60.0, "no close frame"), 60.0)
+        self.assertEqual(live.next_backoff(0.0, "server rejected WebSocket connection: HTTP 403"), 60.0)
+        self.assertEqual(live.next_backoff(2.0, "GET /api/v1/competitions/time -> 403 Bots disabled"), 60.0)
+
     def test_the_per_second_tick_survives_a_network_error(self) -> None:
         class FlakyExchange:
             key = "k"

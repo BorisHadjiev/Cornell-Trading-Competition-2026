@@ -2250,7 +2250,7 @@ class Runner:
             except Exception as exc:  # noqa: BLE001
                 self.note("error", where="book_loop", message=redact(str(exc), self.exchange.key))
             try:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(CLOCK_ERROR_TICK_SECONDS if self._clock_error else 1.0)
             except asyncio.CancelledError:
                 return
 
@@ -2270,6 +2270,8 @@ class Runner:
     async def _run_socket(self, ws_url: str, headers: dict, subscribe: dict) -> None:
         import websockets
 
+        backoff = 0.0
+        self._disconnects = 0
         while time.time() - self.started < self.max_seconds:
             try:
                 async with websockets.connect(
@@ -2281,6 +2283,7 @@ class Runner:
                     max_queue=None,
                 ) as ws:
                     self.connected = True
+                    backoff = 0.0
                     await ws.send(json.dumps(subscribe))
                     self.note("connected", host=self.exchange.host)
                     async for frame in ws:
@@ -2308,22 +2311,46 @@ class Runner:
             except Exception as exc:
                 message = redact(str(exc), self.exchange.key)
                 self.errors.append(message)
-                self.note("disconnected", message=message)
+                backoff = next_backoff(backoff, message)
+                if self._disconnects % 20 == 0 or backoff >= BOTS_DISABLED_WAIT_SECONDS and self._disconnects % 5 == 0:
+                    self.note("disconnected", message=message, next_try_seconds=backoff, count=self._disconnects + 1)
+                self._disconnects += 1
                 if self._halt_state is not None:
                     self.note("stop", why="state", state=self._halt_state)
                     return
                 try:
                     clock = await asyncio.to_thread(self.exchange.get, "/api/v1/competitions/time")
                 except Exception as clock_exc:
-                    self.note("error", where="clock", message=redact(str(clock_exc), self.exchange.key))
+                    if self._disconnects % 20 == 1:
+                        self.note("error", where="clock", message=redact(str(clock_exc), self.exchange.key))
+                    await asyncio.sleep(backoff)
                     continue
                 async with self._act_lock:
                     self._apply_clock(clock)
                 if self._halt_state is not None:
                     self.note("stop", why="state", state=self._halt_state)
                     return
+                await asyncio.sleep(backoff)
                 continue
         self.note("stop", why="time")
+
+
+# Reconnect pacing. The exchange refused the socket with HTTP 403 "Bots disabled" on 24 Oct and the
+# old loop retried without a pause: 2,558 attempts in 30 minutes against the organizers' server.
+RECONNECT_MIN_SECONDS = 2.0
+RECONNECT_MAX_SECONDS = 60.0
+BOTS_DISABLED_WAIT_SECONDS = 60.0
+CLOCK_ERROR_TICK_SECONDS = 15.0
+
+
+def next_backoff(previous: float, message: str) -> float:
+    """Seconds to wait before the next socket attempt: doubling from 2 s to 60 s, and a full
+    minute straight away when the exchange refuses bots (HTTP 403)."""
+    if "403" in str(message) or "disabled" in str(message).lower():
+        return max(float(BOTS_DISABLED_WAIT_SECONDS), float(previous))
+    if previous <= 0:
+        return float(RECONNECT_MIN_SECONDS)
+    return float(min(previous * 2.0, RECONNECT_MAX_SECONDS))
 
 
 def resolve_host(url: str, key: str) -> str:
@@ -2343,8 +2370,10 @@ def resolve_host(url: str, key: str) -> str:
                 if resp.status == 200:
                     return host
         except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                # "No competition configured": the exchange is up, the testnet is between seasons.
+            if exc.code in (403, 404):
+                # 404 "No competition configured": between seasons. 403 "Bots disabled": the
+                # organizers have bots switched off for now. Both mean the exchange is up; the
+                # runner waits with backoff until it is allowed in.
                 return host
             last = f"{host} {exc.code}"
         except OSError as exc:
@@ -2370,10 +2399,10 @@ def main() -> None:
     try:
         clock = Exchange(host, key).get("/api/v1/competitions/time")
     except ExchangeError as exc:
-        if exc.code != 404:
+        if exc.code not in (403, 404):
             raise
         clock = {"state": None, "fictional_time": None, "competition_id": None}
-        print("no competition configured yet; waiting for the next season", flush=True)
+        print("exchange is up but not serving this bot yet (%s); waiting" % exc.code, flush=True)
     print(json.dumps({
         "host": host,
         "state": clock.get("state"),
