@@ -84,6 +84,17 @@ LIVE_PER_NAME_DEADBAND = 0.15
 # the season mark and position-times-mid was -300 to -1,000 a season, most of it from crosses.
 LIVE_CROSS_AT_TOUCH_DEPTH = True
 
+# Live only: an edge floor. A name is opened, or reversed through flat, only when the model's
+# edge against the live mid is at least the larger of LIVE_EDGE_FLOOR_DOLLARS and
+# LIVE_EDGE_FLOOR_SPREADS times the quoted spread. Reductions and same-side adds are not gated.
+# Overnight 24 Oct, 8 testnet seasons: live mids sit about $1.3 from the research house marks on
+# PORT and HAVEN (90th percentile $3-5), the size of a typical edge, and the book reversed 10-17
+# times a season trading that noise; the model view on the live target path earned about 900 a
+# season against 8,000 on the research marks. The research replay has no other participants and
+# cannot score this rule; it is judged on live seasons. None turns it off.
+LIVE_EDGE_FLOOR_DOLLARS = 1.0
+LIVE_EDGE_FLOOR_SPREADS = 2.0
+
 # Resting orders. A rest is cancelled when the quote has moved away from it, but never sooner
 # than MIN_REST_SECONDS: the fitted house half-life after a damage report is 4 s, and a 4-second
 # cancel-and-replace loop on ten names would exhaust the team's 180 actions per minute.

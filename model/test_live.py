@@ -523,6 +523,31 @@ class StateAndCatchUpTests(unittest.TestCase):
         self.assertEqual([(o["quantity"], o["price"]) for o in plain], [(100, 10.0)])
         self.assertIsNone(live.touch_depth({"bid": 10.0, "ask": 10.2}, "sell"))
 
+    def test_edge_floor_blocks_small_opens_and_turns_a_small_reversal_into_a_flatten(self) -> None:
+        port, isle, aqua, grid = (NAMES.index(n) for n in ("PORT", "ISLE", "AQUA", "GRID"))
+        current = np.zeros(len(NAMES)); target = np.zeros(len(NAMES)); fair = np.zeros(len(NAMES))
+        quotes = {n: {"bid": 50.0, "ask": 50.2} for n in NAMES}          # spread 0.20, floor max(1.0, 0.40) = 1.0
+        target[port], fair[port] = 100.0, 50.6                               # open long on a 0.5 edge: blocked
+        target[isle], fair[isle] = 100.0, 51.5                               # open long on a 1.4 edge: allowed
+        current[aqua], target[aqua], fair[aqua] = 80.0, -60.0, 49.7          # reverse on a 0.4 edge: reduce to flat
+        current[grid], target[grid], fair[grid] = 80.0, 120.0, 50.3          # same-side add: never gated
+        out = live.apply_edge_floor(target, current, fair, quotes, dollars=1.0, spreads=2.0)
+        self.assertEqual(float(out[port]), 0.0)
+        self.assertEqual(float(out[isle]), 100.0)
+        self.assertEqual(float(out[aqua]), 0.0)
+        self.assertEqual(float(out[grid]), 120.0)
+        # A wide spread raises the floor: two spreads of 0.80 is 1.60, so a 1.4 edge no longer opens.
+        wide = {n: {"bid": 50.0, "ask": 50.8} for n in NAMES}
+        self.assertEqual(float(live.apply_edge_floor(target, current, fair, wide, 1.0, 2.0)[isle]), 0.0)
+        # An open whose edge sign disagrees with the side does not go out; a reduction is untouched.
+        target[port], fair[port] = -100.0, 52.0
+        current[isle], target[isle] = 100.0, 40.0
+        out = live.apply_edge_floor(target, current, fair, quotes, 1.0, 2.0)
+        self.assertEqual(float(out[port]), 0.0)
+        self.assertEqual(float(out[isle]), 40.0)
+        self.assertIsNone(live.edge_floor(quotes["PORT"], None, None))
+        self.assertTrue(np.array_equal(live.apply_edge_floor(target, current, fair, quotes, None, None), target))
+
     def test_per_name_deadband_holds_small_changes_and_lets_a_dead_name_flatten(self) -> None:
         limits = np.full(len(NAMES), 100.0)
         current = np.zeros(len(NAMES))

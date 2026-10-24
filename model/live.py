@@ -62,6 +62,8 @@ from model.config import (
     LIVE_ANNOUNCEMENT_STAND_DOWN,
     LIVE_BOOK,
     LIVE_CROSS_AT_TOUCH_DEPTH,
+    LIVE_EDGE_FLOOR_DOLLARS,
+    LIVE_EDGE_FLOOR_SPREADS,
     LIVE_ETF_ORDERS,
     LIVE_FLATTEN_AT_ROUND_END,
     LIVE_ONE_ENTRY_PER_ROUND,
@@ -251,6 +253,48 @@ def hold_inside_band(target: np.ndarray, current: np.ndarray, limits: np.ndarray
             continue
         if abs(float(target[index]) - float(current[index])) <= float(band) * float(limits[index]) + 1e-9:
             out[index] = current[index]
+    return out
+
+
+def edge_floor(quote: dict | None, dollars: float | None = LIVE_EDGE_FLOOR_DOLLARS,
+               spreads: float | None = LIVE_EDGE_FLOOR_SPREADS) -> float | None:
+    """The smallest edge that may open or reverse a name on this quote. None means no floor."""
+    if dollars is None and spreads is None:
+        return None
+    floor = float(dollars or 0.0)
+    if spreads is not None and two_sided(quote):
+        floor = max(floor, float(spreads) * (float(quote["ask"]) - float(quote["bid"])))
+    return floor
+
+
+def apply_edge_floor(target: np.ndarray, current: np.ndarray, fair: np.ndarray, quotes: dict[str, dict],
+                     dollars: float | None = LIVE_EDGE_FLOOR_DOLLARS,
+                     spreads: float | None = LIVE_EDGE_FLOOR_SPREADS) -> np.ndarray:
+    """Open or reverse a name only on an edge above the floor; otherwise hold, or reduce to flat.
+
+    A reduction toward flat and an add on the side already held are never blocked. A reversal
+    whose edge is under the floor becomes a reduction to flat. An open whose edge is under the
+    floor, or whose edge sign disagrees with the side, does not go out.
+    """
+    out = target.copy()
+    for index, name in enumerate(NAMES):
+        quote = quotes.get(name)
+        floor = edge_floor(quote, dollars, spreads)
+        if floor is None or not two_sided(quote):
+            continue
+        want = float(target[index])
+        have = float(current[index])
+        side = 1.0 if want > 1e-9 else -1.0 if want < -1e-9 else 0.0
+        if side == 0.0:
+            continue
+        reversing = abs(have) >= 1 and have * want < 0
+        opening = abs(have) < 1
+        if not (opening or reversing):
+            continue
+        mid = 0.5 * (float(quote["bid"]) + float(quote["ask"]))
+        edge = float(fair[index]) - mid
+        if edge * side < floor:
+            out[index] = 0.0 if reversing else have
     return out
 
 
@@ -1796,6 +1840,7 @@ class Runner:
             if plan:
                 plans.append(plan)
         target = hold_inside_band(target, current, self.models.limits, dead)
+        target = apply_edge_floor(target, current, fair, self.quotes)
         adjusted = target.copy()
         for index, name in enumerate(NAMES):
             if name in dead:
