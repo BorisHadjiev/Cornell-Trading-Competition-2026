@@ -53,7 +53,7 @@ If the obvious island short fills 5 marks later and the pair trades still fill o
 1. Do not chase the first advisory. If the price is already at our value, add nothing. If it has gone past us and the book is one-sided, fade a little. If it has not reached us, join, and do not pay through.
 2. Keep half of PORT, ARCH, and REIN for the turn in the track and for the insurers. The first advisory cannot use all of it.
 3. Prefer a pair (composition, or HAVEN vs REIN) to a one-name island short.
-4. Cross the spread only when the gap is wider than the spread. Otherwise rest. Reductions cross. Resting orders are cancelled at the house half-life. Do not cancel and replace every two seconds.
+4. Cross the spread only when the gap is wider than the spread. Otherwise rest. Reductions cross. Resting orders are cancelled at the house half-life. The whole book is flattened when the round ends. After a name opens, that round only reduces it. Do not cancel and replace every two seconds.
 5. For about 45 seconds after an announcement, do not fade the mark. Research seasons have no announcements. This is a live rule, not a fitted lag.
 6. Create or redeem only when both books still disagree after the spread.
 7. Obvious island trades are treated as slow fills. Pair trades may still be fast. A change stays only if the late-fill season does not get worse, and the sign agrees in at least 3 of 4 blocks of 25 holdout seasons.
@@ -78,6 +78,7 @@ The bot we run uses the competition book, not the empty-book maximum (next-mark 
 - Shrink the location add when a composition or insurer pair is already on.
 - Revision and known-damage at 35% of the original sleeve.
 - Severity stays small. After the turn, severity is capped at 0.35 of the uncapped severity target.
+- The book does not carry across a round. A name that has opened is only reduced for the rest of that round.
 - No ETF orders until a live book shows a gap after the spread.
 - Announcement stand-down is on.
 - The first testnet session is one season at fractional size.

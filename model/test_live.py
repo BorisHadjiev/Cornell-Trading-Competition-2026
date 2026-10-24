@@ -212,6 +212,28 @@ class OrderRuleTests(unittest.TestCase):
         untouched = {"exit": {"placed_at": 100.0, "event_key": None}}
         self.assertEqual(live.stale_order_ids(orders, untouched, 1000.0, half), [])
 
+    def test_a_name_does_not_add_or_reverse_after_it_opens(self) -> None:
+        self.assertTrue(live.allows_round_order(0, False, 0, "buy", 10))
+        self.assertTrue(live.allows_round_order(1, False, 0, "buy", 10))
+        self.assertFalse(live.allows_round_order(1, False, 0, "sell", 10))
+        self.assertFalse(live.allows_round_order(1, True, 50, "buy", 10))
+        self.assertTrue(live.allows_round_order(1, True, 50, "sell", 40))
+        self.assertFalse(live.allows_round_order(1, True, 50, "sell", 80))
+        self.assertFalse(live.allows_round_order(-1, True, 0, "buy", 10))
+        self.assertTrue(live.allows_round_order(-1, True, -140, "buy", 140))
+
+    def test_a_round_end_flattens_a_name_the_target_still_wants(self) -> None:
+        position = {name: 0.0 for name in NAMES}
+        position["HAVEN"] = -140
+        quotes = {name: {"bid": 33.5, "ask": 33.82} for name in NAMES}
+        plans = live.flatten_all_orders(position, [], quotes)
+        haven = [order for order in plans if order["symbol"] == "HAVEN"]
+        self.assertEqual(len(haven), 1)
+        self.assertEqual(haven[0]["side"], "buy")
+        self.assertEqual(haven[0]["quantity"], 140)
+        self.assertEqual(haven[0]["price"], 33.82)
+        self.assertTrue(haven[0]["reducing"])
+
 
 if __name__ == "__main__":
     unittest.main()

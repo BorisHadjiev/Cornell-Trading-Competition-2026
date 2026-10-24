@@ -239,6 +239,82 @@ def marketable_flatten(name: str, position: float, resting: list[dict], quote: d
     }
 
 
+def pure_reduce(position: float, side: str, quantity: int) -> bool:
+    """A sell that stops at flat from a long, or a buy that stops at flat from a short."""
+    if quantity < 1 or abs(position) < 1e-9:
+        return False
+    if side == "sell" and position > 0:
+        return quantity <= int(position + 1e-9)
+    if side == "buy" and position < 0:
+        return quantity <= int(-position + 1e-9)
+    return False
+
+
+def allows_round_order(
+    opened_side: int,
+    saw_inventory: bool,
+    position: float,
+    side: str,
+    quantity: int,
+) -> bool:
+    """One entry per name per round. After inventory prints, only a pure reduce.
+
+    The settled season bought HAVEN back and sold it again inside the same round.
+    An add or a flip does not go out. Replacing an entry that has not printed yet,
+    on the same side, still does.
+    """
+    if saw_inventory and abs(position) < 1:
+        return False
+    pos_side = 1 if position > 1e-9 else -1 if position < -1e-9 else 0
+    side_sign = 1 if side == "buy" else -1
+    if pos_side == 0 and opened_side == 0:
+        return True
+    locked = pos_side or opened_side
+    if side_sign == locked and pos_side == 0:
+        return True
+    if side_sign == locked:
+        return False
+    return pure_reduce(position, side, quantity)
+
+
+def screen_round_orders(
+    plans: list[dict],
+    position: dict[str, float],
+    opened_side: dict[str, int],
+    saw_inventory: dict[str, bool],
+) -> list[dict]:
+    kept = []
+    for order in plans:
+        if order.get("flatten") or "side" not in order:
+            kept.append(order)
+            continue
+        name = str(order["symbol"])
+        if allows_round_order(
+            int(opened_side.get(name, 0)),
+            bool(saw_inventory.get(name, False)),
+            float(position.get(name, 0.0)),
+            str(order["side"]),
+            int(order["quantity"]),
+        ):
+            kept.append(order)
+    return kept
+
+
+def flatten_all_orders(position: dict[str, float], orders: list[dict], quotes: dict[str, dict]) -> list[dict]:
+    """Marketable exit for every open name. Used when a round ends and at the next open."""
+    resting: dict[str, list[dict]] = {name: [] for name in NAMES}
+    for order in orders:
+        symbol = order.get("symbol")
+        if symbol in resting:
+            resting[symbol].append(order)
+    plans = []
+    for name in NAMES:
+        plan = marketable_flatten(name, float(position.get(name, 0.0)), resting[name], quotes.get(name))
+        if plan:
+            plans.append(plan)
+    return plans
+
+
 def locked_etf_edges(quotes: dict[str, dict]) -> dict[str, dict[str, float]]:
     """Create uses the ETF bid and the stock asks. Redeem uses the stock bids and the ETF ask."""
     out: dict[str, dict[str, float]] = {}
@@ -751,6 +827,9 @@ class Runner:
         self.justifying_event: str | None = None
         self.flattened_on_exit = False
         self.flatten_order_ids: set[str] = set()
+        self.round_side: dict[str, int] = {}
+        self.saw_inventory: dict[str, bool] = {}
+        self.carry_done = False
 
     def note(self, kind: str, **fields) -> None:
         row = {"kind": kind, "at": time.time(), **fields}
@@ -885,11 +964,33 @@ class Runner:
             if only is not None:
                 planned = [order for order in planned if order["symbol"] in only]
             plans.extend(planned)
+        plans = screen_round_orders(plans, self.position, self.round_side, self.saw_inventory)
         return plans, holding
+
+    def _mark_inventory(self) -> None:
+        for name, qty in self.position.items():
+            if abs(float(qty)) < 1:
+                continue
+            self.saw_inventory[name] = True
+            if name not in self.round_side:
+                self.round_side[name] = 1 if float(qty) > 0 else -1
+
+    def _note_entry(self, order: dict) -> None:
+        if "side" not in order or order.get("flatten"):
+            return
+        name = str(order["symbol"])
+        if name in self.round_side:
+            return
+        pos = float(self.position.get(name, 0.0))
+        if abs(pos) >= 1:
+            self.round_side[name] = 1 if pos > 0 else -1
+        elif not order.get("reducing"):
+            self.round_side[name] = 1 if order["side"] == "buy" else -1
 
     def _submit_plans(self, plans: list[dict]) -> None:
         for order in plans:
             order["event_key"] = order.get("event_key") or self.justifying_event
+            self._note_entry(order)
             self._submit(order)
 
     def act(self, reason: str) -> None:
@@ -908,6 +1009,14 @@ class Runner:
         expired_symbols = self._cancel_expired()
         if reason == "stale" and not expired_symbols:
             return
+        self._mark_inventory()
+        if not self.carry_done:
+            self.carry_done = True
+            if any(self.saw_inventory.values()):
+                carried = flatten_all_orders(self.position, self.open_orders, self.quotes)
+                self.note("flatten", why="carry", orders=len(carried))
+                self._submit_plans(carried)
+                return
         try:
             state, target, fair = self._load_target()
         except Exception as exc:
@@ -938,7 +1047,11 @@ class Runner:
             self._maybe_etf()
 
     def flatten_dead_targets(self) -> None:
-        """Round left `running`. Flatten every name the target no longer wants."""
+        """Round left `running`. Flatten every open name, not only a dead target.
+
+        The settled book carried a HAVEN short from the round-1 close near 34
+        and covered it the next morning near 43. Nothing is held across the gap.
+        """
         if self.flattened_on_exit:
             return
         self.flattened_on_exit = True
@@ -948,15 +1061,13 @@ class Runner:
         self._sync_mark()
         try:
             self.refresh_account()
-            _state, target, _fair = self._load_target()
         except Exception as exc:
             self.errors.append(str(exc))
             self.note("error", where="flatten", message=str(exc))
             return
-        _plans, _holding = self._plans(target, _fair, None)
-        dead_plans = [plan for plan in _plans if plan.get("flatten")]
-        self.note("flatten", orders=len(dead_plans))
-        self._submit_plans(dead_plans)
+        plans = flatten_all_orders(self.position, self.open_orders, self.quotes)
+        self.note("flatten", orders=len(plans), why="round_end")
+        self._submit_plans(plans)
 
     def _submit(self, order: dict) -> None:
         if "side" not in order:
